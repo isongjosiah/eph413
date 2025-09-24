@@ -18,7 +18,7 @@ This checklist outlines the two primary stages of the research: (I) a rigorous d
         
     *   - [ ] Configure federation with 100 clients.
         
-*   **1.2. Establish "Genomic Non-IID" Universe (Universe B):**
+*   **1.2. Establish "Genomic Non-IID" Universe (Universe B):** Ended up using CINECA synthetic dataset
     
     *   **structured feature skew**.
         
