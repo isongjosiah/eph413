@@ -21,6 +21,7 @@ and note this is a limitation of the framework, and that for certain heterogenei
 going for a likely suboptimal solution for instance training genomic data from european descent in a cluster.
 - what would be the best way to identify the different heterogeneity and what are the privacy concern and how much of a concern is it? How can we abstract
 semi-sensitive data if possible and identify the trade-offs when it isn't.
+- can we handle temporal data heterogeneity shift
 
 ## Rough system architecture
 we have aware-clients containing data, we have the central server containing the global model and a hypernetwork for generating
@@ -39,7 +40,9 @@ we have aware-clients containing data, we have the central server containing the
 
 ### Evaluation Framework
 - [ ] Define model performance metrics (accuracy, F1, AUC)
-- [ ] Define fairness metrics across different populations/batches
+- [ ] Convergence rate
+- [ ] Define fairness metrics across different populations/batches (model performing poorly for client with underrepresented data types)
 - [ ] Establish statistical significance testing approach
+
 
 
