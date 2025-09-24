@@ -39,18 +39,15 @@ from collections import OrderedDict
 import os
 import sys
 
-# Import from existing modules (assuming they're in the same directory)
-# In production, adjust these imports based on your project structure
-try:
-    from standard import generate_synthetic_data, visualize_data_distribution
-    from comparison import (
-        HeterogeneitySimulator, HeterogeneityConfig, 
-        PRSDataset, PRSDeepNet, ModelConfig,
-        CINECADataLoader, DataPartitioner
-    )
-except ImportError:
-    print("Warning: Could not import from standard.py or comparison.py")
-    print("Please ensure these files are in the same directory")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Import from existing modules
+from scripts.data.synthetic.standard import generate_synthetic_data, visualize_data_distribution
+from pocs.fedbio import (
+    HeterogeneitySimulator, HeterogeneityConfig, 
+    PRSDataset, PRSDeepNet, ModelConfig,
+    CINECADataLoader, DataPartitioner
+)
 
 warnings.filterwarnings('ignore')
 
@@ -621,9 +618,8 @@ class FederatedExperimentRunner:
         
         # Apply heterogeneity
         het_simulator = HeterogeneitySimulator(HeterogeneityConfig())
-        X = genotype_data.drop(['sample_id'], axis=1, errors='ignore').values
-        y = phenotype_data['prs_score'].values
-        
+            X = genotype_data.drop(['sample_id'], axis=1, errors='ignore').values.astype(np.float64)
+            y = phenotype_data['prs_score'].values        
         # Apply specific heterogeneity type
         if heterogeneity_type == 'population':
             X = het_simulator.simulate_population_stratification(X, metadata)

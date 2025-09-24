@@ -249,7 +249,7 @@ class HeterogeneitySimulator:
                 mask[pathway_features] = True
                 
                 # Zero out non-pathway features for these samples
-                X_allelic[pathway_mask, ~mask] *= 0.1
+                X_allelic[np.ix_(pathway_mask, ~mask)] *= 0.1
                 
         logger.info(f"Applied allelic heterogeneity with {n_pathways} pathways")
         return X_allelic, y_allelic
@@ -431,7 +431,7 @@ class PRSModelTrainer:
         train_dataset = PRSDataset(X_train, y_train)
         val_dataset = PRSDataset(X_val, y_val)
         
-        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True, drop_last=True)
         val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
         
         # Initialize model
