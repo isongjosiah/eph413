@@ -618,8 +618,9 @@ class FederatedExperimentRunner:
         
         # Apply heterogeneity
         het_simulator = HeterogeneitySimulator(HeterogeneityConfig())
-            X = genotype_data.drop(['sample_id'], axis=1, errors='ignore').values.astype(np.float64)
-            y = phenotype_data['prs_score'].values        
+        X = genotype_data.drop(['sample_id'], axis=1, errors='ignore').values.astype(np.float64)
+        y = phenotype_data['prs_score'].values
+        
         # Apply specific heterogeneity type
         if heterogeneity_type == 'population':
             X = het_simulator.simulate_population_stratification(X, metadata)
