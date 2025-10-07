@@ -37,7 +37,7 @@ def run_central_model():
 
 def run_federated_experiments():
     """Runs federated learning experiments with different strategies."""
-    strategies = ["FedAvg", "FedProx"]
+    strategies = ["FedAvg", "FedProx", "FedAdam", "FedYogi", "FedAdagrad"]
     results = {}
 
     for strategy in strategies:

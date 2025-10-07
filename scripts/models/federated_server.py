@@ -14,26 +14,36 @@ import numpy as np
 
 from sklearn.preprocessing import StandardScaler
 
+from scripts.models.strategy_factory import get_strategy
+from flwr.common import ndarrays_to_parameters
+
+
 def client_fn(cid: str, partitions):
     """Create a Flower client."""
     # Load data for this client
     client_data = partitions[int(cid)]
-    
+
     X = client_data.iloc[:, :-1].values
     y_str = client_data.iloc[:, -1].values
 
     # Convert y to numeric
-    y = np.array([0 if val == 'Short' else 1 for val in y_str])
+    y = np.array([0 if val == "Short" else 1 for val in y_str])
 
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
     # Scale data
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
 
-    train_dataset = TensorDataset(torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train))
-    val_dataset = TensorDataset(torch.FloatTensor(X_val_scaled), torch.FloatTensor(y_val))
+    train_dataset = TensorDataset(
+        torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train)
+    )
+    val_dataset = TensorDataset(
+        torch.FloatTensor(X_val_scaled), torch.FloatTensor(y_val)
+    )
 
     # Create model
     n_variants = X_train.shape[1]
@@ -41,21 +51,22 @@ def client_fn(cid: str, partitions):
 
     return FlowerClient(model, train_dataset, val_dataset).to_client()
 
-from scripts.models.custom_strategy import CustomFedAvg, CustomFedProx
 
 def run_federated_simulation(num_clients: int, strategy_name: str = "FedAvg"):
-    """Run federated learning simulation.""" 
-    
+    """Run federated learning simulation."""
+
     feature_matrix = prepare_feature_matrix()
     partitions = partition_data(feature_matrix, num_partitions=num_clients)
 
-    if strategy_name == "FedAvg":
-        strategy = CustomFedAvg()
-    elif strategy_name == "FedProx":
-        strategy = CustomFedProx(proximal_mu=0.1)
-    # Add other strategies here
-    else:
-        raise ValueError(f"Unknown strategy: {strategy_name}")
+    # Create a temporary model to get initial parameters
+    n_variants = feature_matrix.shape[1] - 1
+    temp_model = PolygenicNeuralNetwork(n_variants=n_variants, n_loci=100)
+    initial_parameters_ndarrays = [
+        val.cpu().numpy() for _, val in temp_model.state_dict().items()
+    ]
+    initial_parameters = ndarrays_to_parameters(initial_parameters_ndarrays)
+
+    strategy = get_strategy(strategy_name, initial_parameters)
 
     # Start simulation
     history = fl.simulation.start_simulation(
@@ -66,6 +77,7 @@ def run_federated_simulation(num_clients: int, strategy_name: str = "FedAvg"):
     )
 
     return history
+
 
 if __name__ == "__main__":
     history = run_federated_simulation(num_clients=3)
