@@ -7,9 +7,7 @@ for analysis.
 import pandas as pd
 from scripts.models.central_model import PolygenicNeuralNetwork
 from sklearn.model_selection import train_test_split
-
-from sklearn.model_selection import train_test_split
-
+from scripts.models.federated_server import run_federated_simulation
 
 def run_central_model():
     """
@@ -37,6 +35,21 @@ def run_central_model():
 
     print("Centralized Model Metrics:", metrics)
 
+def run_federated_experiments():
+    """Runs federated learning experiments with different strategies."""
+    strategies = ["FedAvg", "FedProx"]
+    results = {}
+
+    for strategy in strategies:
+        print(f"--- Running experiment with {strategy} ---")
+        history = run_federated_simulation(num_clients=3, strategy_name=strategy)
+        results[strategy] = history
+        print(f"--- Finished experiment with {strategy} ---")
+
+    print("\n--- Experiment Results ---")
+    for strategy, history in results.items():
+        print(f"Strategy: {strategy}")
+        print(history)
 
 if __name__ == "__main__":
-    run_central_model()
+    run_federated_experiments()

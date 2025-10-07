@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, average_precision_score
 import numpy as np
 
@@ -31,7 +30,6 @@ class PolygenicNeuralNetwork(nn.Module):
         self.n_variants = n_variants
         self.n_loci = n_loci or n_variants
         self.dropout_rate = dropout_rate
-        self.scaler = StandardScaler()
         self.random_seed = random_seed
 
         # Defien the network layers
@@ -67,14 +65,11 @@ class PolygenicNeuralNetwork(nn.Module):
         learning_rate: float = 0.01,
     ):
         """Custom training loop for the PyTorch model."""
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val)
-
         train_dataset = TensorDataset(
-            torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train.reshape(-1, 1))
+            torch.FloatTensor(X_train), torch.FloatTensor(y_train.reshape(-1, 1))
         )
         val_dataset = TensorDataset(
-            torch.FloatTensor(X_val_scaled), torch.FloatTensor(y_val.reshape(-1, 1))
+            torch.FloatTensor(X_val), torch.FloatTensor(y_val.reshape(-1, 1))
         )
 
         train_loader = DataLoader(
@@ -108,8 +103,7 @@ class PolygenicNeuralNetwork(nn.Module):
     def predict_risk_score(self, X: np.ndarray) -> np.ndarray:
         """Predict risk scores for new samples."""
         self.eval()
-        X_scaled = self.scaler.transform(X)
-        X_tensor = torch.FloatTensor(X_scaled)
+        X_tensor = torch.FloatTensor(X)
         with torch.no_grad():
             scores = self(X_tensor)
         return scores.detach().numpy().flatten()

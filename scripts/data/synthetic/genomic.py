@@ -136,23 +136,83 @@ def prepare_feature_matrix():
     return feature_matrix
 
 
-if __name__ == "__main__":
-    prepare_feature_matrix()
-
-
-def partition_data(feature_matrix, num_partitions):
+def partition_data(feature_matrix, num_partitions, rare_variant_threshold=0.05):
     """
-    Partitions the dataset to simulate different allelic heterogeneity situations.
+    Partitions the dataset to simulate rare variant heterogeneity.
 
     Args:
         feature_matrix: The input feature matrix.
         num_partitions: The number of partitions to create.
+        rare_variant_threshold: The frequency threshold to identify rare variants.
 
     Returns:
         A list of partitions.
     """
-    # TODO: Implement this function.
-    pass
+    # Identify rare variants
+    variant_frequencies = (feature_matrix.drop(columns=['Height_Category'], errors='ignore') != 0).mean()
+    rare_variants = variant_frequencies[variant_frequencies < rare_variant_threshold].index.tolist()
+
+    if not rare_variants:
+        # If no rare variants, fall back to the previous partitioning strategy
+        return partition_by_height_category(feature_matrix, num_partitions)
 
 
-prepare_feature_matrix()
+    partitions = []
+    samples_per_partition = len(feature_matrix) // num_partitions
+
+    # Assign each partition a subset of rare variants to be enriched for
+    rare_variant_subsets = np.array_split(rare_variants, num_partitions)
+
+    for i in range(num_partitions):
+        enriched_variants = rare_variant_subsets[i]
+        
+        # Find samples that have at least one of the enriched rare variants
+        if not enriched_variants.size:
+            continue
+        partition_samples_mask = (feature_matrix[enriched_variants] != 0).any(axis=1)
+        partition_samples = feature_matrix[partition_samples_mask]
+        
+        # If not enough samples, fill with random samples
+        if len(partition_samples) < samples_per_partition:
+            remaining_samples_count = samples_per_partition - len(partition_samples)
+            if remaining_samples_count > 0:
+                remaining_samples = feature_matrix[~partition_samples_mask].sample(n=remaining_samples_count, replace=True)
+                partition = pd.concat([partition_samples, remaining_samples])
+            else:
+                partition = partition_samples
+        else:
+            partition = partition_samples.sample(n=samples_per_partition, replace=False)
+
+        partitions.append(partition)
+
+    return partitions
+
+def partition_by_height_category(feature_matrix, num_partitions):
+    # The previously defined partitioning function
+    partitions = []
+    tall_group = feature_matrix[feature_matrix['Height_Category'] == 'Tall']
+    short_group = feature_matrix[feature_matrix['Height_Category'] == 'Short']
+
+    proportions = []
+    for i in range(num_partitions):
+        tall_prop = (i + 1) / (num_partitions + 1)
+        short_prop = 1 - tall_prop
+        proportions.append({'tall': tall_prop, 'short': short_prop})
+
+    for i in range(num_partitions):
+        tall_sample = tall_group.sample(frac=proportions[i]['tall'])
+        short_sample = short_group.sample(frac=proportions[i]['short'])
+        partition = pd.concat([tall_sample, short_sample])
+        partitions.append(partition)
+
+    return partitions
+
+
+if __name__ == "__main__":
+    feature_matrix = prepare_feature_matrix()
+    if feature_matrix is not None:
+        partitions = partition_data(feature_matrix, num_partitions=3)
+        if partitions:
+            print(f"Successfully created {len(partitions)} partitions.")
+            for i, p in enumerate(partitions):
+                print(f"  Partition {i+1}: {len(p)} samples")
