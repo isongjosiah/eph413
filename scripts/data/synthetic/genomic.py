@@ -19,8 +19,6 @@ def _calculate_sds(row, lms_male, lms_female):
     Returns:
         float or None: The calculated SDS, or None if parameters unavailable.
     """
-    print("row is ")
-    print(row)
     height = row["PHENOTYPE"]
     age_months = row["Agemos"]
     sex = row["SEX"]
@@ -51,8 +49,6 @@ def _calculate_sds(row, lms_male, lms_female):
             return 0
         sds = ((ratio**L) - 1) / (L * S)
 
-    print("sds is -> ", sds)
-
     return sds
 
 
@@ -68,12 +64,10 @@ def _categorize_height(sds):
     """
     if pd.isna(sds):
         return "Unknown"
-    elif sds <= -2.0:
-        return "Short"
     elif sds >= 2.0:
         return "Tall"
     else:
-        return "Mid"
+        return "Short"
 
 
 def prepare_feature_matrix():
@@ -100,6 +94,10 @@ def prepare_feature_matrix():
     np.random.seed(42)
     feature_matrix["Age_years"] = np.random.uniform(2, 20, size=len(feature_matrix))
     feature_matrix["Agemos"] = (feature_matrix["Age_years"] * 12).apply(np.floor) + 0.5
+    feature_matrix.drop("FID", axis=1, inplace=True)
+    feature_matrix.drop("IID", axis=1, inplace=True)
+    feature_matrix.drop("PAT", axis=1, inplace=True)
+    feature_matrix.drop("MAT", axis=1, inplace=True)
 
     # Create dictionaries for male and female LMS parameters, keyed by age in months
     lms_male = (
@@ -122,6 +120,10 @@ def prepare_feature_matrix():
     feature_matrix["Height_Category"] = feature_matrix["Height_SDS"].apply(
         _categorize_height
     )
+
+    feature_matrix.drop("Height_SDS", axis=1, inplace=True)
+    feature_matrix.drop("Agemos", axis=1, inplace=True)
+    feature_matrix.drop("Age_years", axis=1, inplace=True)
 
     try:
         # Save the feature matrix to a CSV file
