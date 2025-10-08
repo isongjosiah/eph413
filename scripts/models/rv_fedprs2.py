@@ -5,7 +5,7 @@ This script implements the RV-FedPRS framework using PyTorch and Flower (FL fram
 Fixed for Flower 1.11+ API compatibility.
 """
 
-from flwr.server import ClientManager, client_manager, server_app
+from flwr.server import server_app
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional, Set
 from dataclasses import dataclass
 import flwr as fl
-from flwr.common import Context, EvaluateRes, FitRes, Metrics, Parameters
+from flwr.common import Context, Metrics
 from flwr.server.strategy import FedAvg, FedProx
 import warnings
 from collections import OrderedDict
@@ -23,10 +23,7 @@ from sklearn.cluster import AgglomerativeClustering
 import time
 import random
 from copy import deepcopy
-import sys
-import os
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from scripts.data.synthetic.genomic import GeneticDataGenerator
 
 warnings.filterwarnings("ignore")
@@ -42,12 +39,12 @@ class HistoryTrackingStrategy(fl.server.strategy.FedAvg):
 
     def __init__(self, base_strategy, history_dict):
         super().__init__(
-            fraction_fit=base_strategy.strategy.fraction_fit,
-            fraction_evaluate=base_strategy.strategy.fraction_evaluate,
-            min_fit_clients=base_strategy.strategy.min_fit_clients,
-            min_evaluate_clients=base_strategy.strategy.min_evaluate_clients,
-            min_available_clients=base_strategy.strategy.min_available_clients,
-            evaluate_metrics_aggregation_fn=base_strategy.strategy.evaluate_metrics_aggregation_fn,
+            fraction_fit=base_strategy.fraction_fit,
+            fraction_evaluate=base_strategy.fraction_evaluate,
+            min_fit_clients=base_strategy.min_fit_clients,
+            min_evaluate_clients=base_strategy.min_evaluate_clients,
+            min_available_clients=base_strategy.min_available_clients,
+            evaluate_metrics_aggregation_fn=base_strategy.evaluate_metrics_aggregation_fn,
         )
         self.base_strategy = base_strategy
         self.history = history_dict
@@ -587,8 +584,12 @@ class FederatedComparison:
         self.results[strategy_name]["times"].append(elapsed_time)
 
         # Store collected history data
-        self.results[strategy_name]["losses"] = history_data["eval_losses"]
-        self.results[strategy_name]["accuracies"] = history_data["accuracies"]
+        self.results[strategy_name]["losses"] = [
+            v for _, v in history_data["eval_losses"]
+        ]
+        self.results[strategy_name]["accuracies"] = [
+            v for _, v in history_data["accuracies"]
+        ]
 
         print(f"{strategy_name} completed in {elapsed_time:.2f}s")
         print(
@@ -708,8 +709,6 @@ class FederatedComparison:
         """Run comparison of all strategies."""
         # Initial model for all strategies
         initial_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
-        params = [val.cpu().numpy() for val in initial_model.state_dict().values()]
-        initial_parameters = fl.common.ndarrays_to_parameters(params)
 
         # 1. FedAvg
         fedavg_strategy = FedAvg(
@@ -738,7 +737,7 @@ class FederatedComparison:
 
         # 3. FedCE (RV-FedPRS)
         fedce_strategy = FedCEStrategy(
-            initial_parameters=initial_parameters,
+            initial_model=initial_model,
             n_clusters=3,
             min_fit_clients=2,
             min_evaluate_clients=2,
@@ -752,161 +751,112 @@ class FederatedComparison:
             )
 
     def plot_results(self):
-        """Generate comparison plots for different metrics and save them as separate files."""
+        """Generate comparison plots using actual simulation results."""
         strategies = list(self.results.keys())
 
-        # Plot 1: Training efficiency (time)
-        fig1, ax1 = plt.subplots(figsize=(8, 6))
+        # Determine max rounds from available data - handle empty case
+        max_rounds_losses = [
+            len(self.results[s]["losses"])
+            for s in strategies
+            if self.results[s]["losses"]
+        ]
+        max_rounds_acc = [
+            len(self.results[s]["accuracies"])
+            for s in strategies
+            if self.results[s]["accuracies"]
+        ]
+
+        # If no data at all, create placeholder plots
+        if not max_rounds_losses and not max_rounds_acc:
+            print("WARNING: No metrics data available to plot. Skipping visualization.")
+            return
+
+        max_rounds = max(max_rounds_losses + max_rounds_acc, default=self.n_rounds)
+        rounds = np.arange(1, max_rounds + 1)
+
+        # Plot 1: Convergence curves (Loss)
+        fig_loss, ax_loss = plt.subplots(figsize=(8, 6))
+        has_loss_data = False
+        for strategy in strategies:
+            if self.results[strategy]["losses"]:
+                has_loss_data = True
+                loss_data = self.results[strategy]["losses"]
+                ax_loss.plot(
+                    np.arange(1, len(loss_data) + 1),
+                    loss_data,
+                    marker="o",
+                    label=strategy,
+                    linewidth=2,
+                )
+
+        if has_loss_data:
+            ax_loss.set_title(
+                "Convergence Comparison (Loss)", fontsize=14, fontweight="bold"
+            )
+            ax_loss.set_xlabel("Federated Round")
+            ax_loss.set_ylabel("Average Loss")
+            ax_loss.legend()
+            ax_loss.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig("convergence_loss_comparison.png")
+            print("Saved convergence_loss_comparison.png")
+        else:
+            print("WARNING: No loss data available for plotting")
+        plt.close(fig_loss)
+
+        # Plot 2: Accuracy over rounds
+        fig_acc, ax_acc = plt.subplots(figsize=(8, 6))
+        has_acc_data = False
+        for strategy in strategies:
+            if self.results[strategy]["accuracies"]:
+                has_acc_data = True
+                acc_data = self.results[strategy]["accuracies"]
+                ax_acc.plot(
+                    np.arange(1, len(acc_data) + 1),
+                    acc_data,
+                    marker="s",
+                    label=strategy,
+                    linewidth=2,
+                )
+
+        if has_acc_data:
+            ax_acc.set_title(
+                "Model Accuracy Comparison", fontsize=14, fontweight="bold"
+            )
+            ax_acc.set_xlabel("Federated Round")
+            ax_acc.set_ylabel("Average Accuracy")
+            ax_acc.legend()
+            ax_acc.grid(True, alpha=0.3)
+            ax_acc.set_ylim([0.5, 1.0])
+            plt.tight_layout()
+            plt.savefig("accuracy_comparison.png")
+            print("Saved accuracy_comparison.png")
+        else:
+            print("WARNING: No accuracy data available for plotting")
+        plt.close(fig_acc)
+
+        # Plot 3: Training efficiency (time)
+        fig_time, ax_time = plt.subplots(figsize=(8, 6))
         times = [
             self.results[s]["times"][0] if self.results[s]["times"] else 0
             for s in strategies
         ]
-        ax1.bar(strategies, times, color=["blue", "green", "red"])
-        ax1.set_title(
-            "Computation Efficiency (Training Time)", fontsize=14, fontweight="bold"
-        )
-        ax1.set_ylabel("Time (seconds)")
-        ax1.set_xlabel("Strategy")
-        ax1.grid(axis="y", alpha=0.3)
-        plt.tight_layout()
-        plt.savefig("computation_efficiency.png")
-        plt.close(fig1)
-
-        # Plot 2: Convergence curves
-        fig2, ax2 = plt.subplots(figsize=(8, 6))
-        for strategy in strategies:
-            if self.results[strategy]["losses"]:
-                rounds = [item[0] for item in self.results[strategy]["losses"]]
-                losses = [item[1] for item in self.results[strategy]["losses"]]
-                ax2.plot(rounds, losses, marker="o", label=strategy, linewidth=2)
-
-        ax2.set_title("Convergence Comparison", fontsize=14, fontweight="bold")
-        ax2.set_xlabel("Federated Round")
-        ax2.set_ylabel("Loss")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig("convergence_comparison.png")
-        plt.close(fig2)
-
-        # Plot 3: Model accuracy comparison
-        fig3, ax3 = plt.subplots(figsize=(8, 6))
-        final_accuracies = {}
-        for s in strategies:
-            if self.results[s]["accuracies"]:
-                final_accuracies[s] = self.results[s]["accuracies"][-1][1]
-            else:
-                final_accuracies[s] = 0
-
-        x = np.arange(len(strategies))
-
-        bars = ax3.bar(
-            x,
-            [final_accuracies[s] for s in strategies],
-            label="Final Accuracy",
-            color="skyblue",
-        )
-
-        ax3.set_title("Accuracy Comparison", fontsize=14, fontweight="bold")
-        ax3.set_xlabel("Strategy")
-        ax3.set_ylabel("Accuracy")
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(strategies)
-        ax3.legend()
-        ax3.grid(axis="y", alpha=0.3)
-        ax3.set_ylim([0.0, 1.0])
-
-        for bar in bars:
-            height = bar.get_height()
-            ax3.annotate(
-                f"{height:.3f}",
-                xy=(bar.get_x() + bar.get_width() / 2, height),
-                xytext=(0, 3),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-            )
-        plt.tight_layout()
-        plt.savefig("accuracy_comparison.png")
-        plt.close(fig3)
-
-        print("Generated and saved all comparison plots.")
-
-    def evaluate_model_on_data(self, model, data):
-        model.eval()
-        prs_tensor = torch.FloatTensor(data["prs_scores"].reshape(-1, 1))
-        rare_tensor = torch.FloatTensor(data["rare_dosages"])
-        phenotype_tensor = torch.FloatTensor(data["phenotype_binary"].reshape(-1, 1))
-
-        dataset = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
-        loader = DataLoader(dataset, batch_size=32)
-
-        correct = 0
-        total = 0
-        with torch.no_grad():
-            for prs, rare, targets in loader:
-                outputs = model(prs, rare)
-                predicted = (outputs > 0.5).float()
-                total += targets.size(0)
-                correct += (predicted == targets).sum().item()
-
-        return correct / total if total > 0 else 0
-
-    def plot_heterogeneity_results(self):
-        """Plot how each strategy performs on different population clusters."""
-
-        # Group client datasets by population
-        population_datasets = {}
-        for i, dataset in enumerate(self.client_datasets):
-            pop_id = dataset["population_id"]
-            if pop_id not in population_datasets:
-                population_datasets[pop_id] = []
-            population_datasets[pop_id].append(dataset)
-
-        population_ids = sorted(population_datasets.keys())
-        strategies = list(self.final_models.keys())
-
-        results = {s: [] for s in strategies}
-
-        for strategy_name, params in self.final_models.items():
-            model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
-            params_dict = zip(model.state_dict().keys(), params)
-            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-            model.load_state_dict(state_dict, strict=True)
-
-            for pop_id in population_ids:
-                pop_accuracies = []
-                for client_data in population_datasets[pop_id]:
-                    accuracy = self.evaluate_model_on_data(model, client_data)
-                    pop_accuracies.append(accuracy)
-
-                results[strategy_name].append(np.mean(pop_accuracies))
-
-        # Now plot the results
-        fig, ax = plt.subplots(figsize=(10, 7))
-        x = np.arange(len(population_ids))
-        width = 0.2
-
-        for i, strategy_name in enumerate(strategies):
-            ax.bar(x + i * width, results[strategy_name], width, label=strategy_name)
-
-        ax.set_title(
-            "Performance on Different Population Clusters",
+        ax_time.bar(strategies, times, color=["blue", "green", "red"])
+        ax_time.set_title(
+            "Computation Efficiency (Total Training Time)",
             fontsize=14,
             fontweight="bold",
         )
-        ax.set_xlabel("Population ID")
-        ax.set_ylabel("Accuracy")
-        ax.set_xticks(x + width * (len(strategies) - 1) / 2)
-        ax.set_xticklabels([f"Population {pid}" for pid in population_ids])
-        ax.legend()
-        ax.grid(axis="y", alpha=0.3)
-        ax.set_ylim([0.5, 1.0])
-
+        ax_time.set_ylabel("Time (seconds)")
+        ax_time.set_xlabel("Strategy")
+        ax_time.grid(axis="y", alpha=0.3)
         plt.tight_layout()
-        plt.savefig("heterogeneity_performance.png")
-        plt.close(fig)
-        print("Generated and saved heterogeneity performance plot.")
+        plt.savefig("computation_efficiency.png")
+        print("Saved computation_efficiency.png")
+        plt.close(fig_time)
+
+        if has_loss_data or has_acc_data:
+            print("\nGenerated comparison plots based on available simulation results.")
 
     def generate_detailed_report(self):
         """Generate a detailed comparison report."""
@@ -923,22 +873,15 @@ class FederatedComparison:
 
         print("\n2. MODEL ACCURACY")
         print("-" * 40)
-        # Simulated final accuracies
-        accuracies = {
-            "FedAvg": {"general": 0.82, "rare": 0.75},
-            "FedProx": {"general": 0.83, "rare": 0.77},
-            "FedCE": {"general": 0.86, "rare": 0.88},
-        }
-
-        for strategy, acc in accuracies.items():
-            print(
-                f"{strategy:12} | General: {acc['general']:.3f} | Rare Variants: {acc['rare']:.3f}"
-            )
+        for strategy, data in self.results.items():
+            if data["accuracies"]:
+                final_acc = data["accuracies"][-1]
+                print(f"{strategy:12} | Final Accuracy: {final_acc:.4f}")
 
         print("\n3. KEY ADVANTAGES OF RV-FedPRS (FedCE)")
         print("-" * 40)
         advantages = [
-            "✓ Superior performance on rare variant prediction (+13% vs FedAvg)",
+            "✓ Superior performance on rare variant prediction",
             "✓ Maintains population-specific patterns through clustering",
             "✓ Asymmetric aggregation preserves local genetic signals",
             "✓ Scalable to large number of clients and variants",
@@ -947,89 +890,17 @@ class FederatedComparison:
         for advantage in advantages:
             print(f"  {advantage}")
 
-        print("\n4. POPULATION HETEROGENEITY HANDLING")
-        print("-" * 40)
-        print("  FedCE successfully identified 3 distinct population clusters")
-        print("  Cluster-specific models maintained for rare variant pathways")
-        print("  Common variant backbone shared globally for efficiency")
-
         print("\n" + "=" * 80)
 
 
 # ==================== Utility Functions ====================
 
 
-def evaluate_rare_variant_performance(
-    model: HierarchicalPRSModel, test_data: Dict, variant_threshold: int = 10
-) -> Dict:
-    """
-    Evaluate model performance specifically on rare variant predictions.
-
-    Args:
-        model: Trained model to evaluate
-        test_data: Test dataset with rare variants
-        variant_threshold: Minimum number of rare variants to consider
-
-    Returns:
-        Dictionary with performance metrics
-    """
-    model.eval()
-
-    # Convert to tensors
-    prs_tensor = torch.FloatTensor(test_data["prs_scores"].reshape(-1, 1))
-    rare_tensor = torch.FloatTensor(test_data["rare_dosages"])
-    phenotype_tensor = torch.FloatTensor(test_data["phenotype_binary"].reshape(-1, 1))
-
-    # Identify samples with significant rare variant burden
-    rare_burden = (rare_tensor > 0).sum(dim=1)
-    high_burden_mask = rare_burden >= variant_threshold
-
-    if high_burden_mask.sum() == 0:
-        return {"error": "No samples with sufficient rare variant burden"}
-
-    # Evaluate on high-burden samples
-    with torch.no_grad():
-        outputs = model(prs_tensor[high_burden_mask], rare_tensor[high_burden_mask])
-        targets = phenotype_tensor[high_burden_mask]
-
-        # Calculate metrics
-        predictions = (outputs > 0.5).float()
-        accuracy = (predictions == targets).float().mean().item()
-
-        # Calculate sensitivity and specificity
-        true_positives = ((predictions == 1) & (targets == 1)).sum().item()
-        true_negatives = ((predictions == 0) & (targets == 0)).sum().item()
-        false_positives = ((predictions == 1) & (targets == 0)).sum().item()
-        false_negatives = ((predictions == 0) & (targets == 1)).sum().item()
-
-        sensitivity = (
-            true_positives / (true_positives + false_negatives)
-            if (true_positives + false_negatives) > 0
-            else 0
-        )
-        specificity = (
-            true_negatives / (true_negatives + false_positives)
-            if (true_negatives + false_positives) > 0
-            else 0
-        )
-
-    return {
-        "accuracy": accuracy,
-        "sensitivity": sensitivity,
-        "specificity": specificity,
-        "n_samples": high_burden_mask.sum().item(),
-        "mean_rare_burden": rare_burden[high_burden_mask].mean().item(),
-    }
-
-
 def visualize_population_clustering(client_datasets: List[Dict]):
     """
-    Visualize the population structure and rare variant heterogeneity, saving plots as separate files.
-
-    Args:
-        client_datasets: List of client datasets with population information
+    Visualize the population structure and rare variant heterogeneity.
     """
-    # Plot 1: Rare variant distribution across populations
+    # Plot 1: Rare variant distribution
     fig1, ax1 = plt.subplots(figsize=(8, 6))
     population_variants = {}
     for data in client_datasets:
@@ -1047,7 +918,7 @@ def visualize_population_clustering(client_datasets: List[Dict]):
             if other_pop != pop:
                 unique_variants = unique_variants - population_variants[other_pop]
         variant_counts.append(len(unique_variants))
-        labels.append(f"Pop {pop}\\n(Unique)")
+        labels.append(f"Pop {pop}\n(Unique)")
 
     all_shared = set.intersection(*[population_variants[p] for p in populations])
     variant_counts.append(len(all_shared))
@@ -1064,7 +935,7 @@ def visualize_population_clustering(client_datasets: List[Dict]):
     plt.savefig("rare_variant_distribution.png")
     plt.close(fig1)
 
-    # Plot 2: PCA visualization of genetic structure (simulated)
+    # Plot 2: Population structure
     fig2, ax2 = plt.subplots(figsize=(8, 6))
     np.random.seed(42)
     for data in client_datasets:
@@ -1109,11 +980,11 @@ def main():
     print("=" * 80)
 
     # Set up parameters
-    N_CLIENTS = 6
-    N_ROUNDS = 500  # Reduced for demo
-    N_RARE_VARIANTS = 500
+    N_CLIENTS = 7
+    N_ROUNDS = 1000
+    N_RARE_VARIANTS = 50
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  - Number of clients: {N_CLIENTS}")
     print(f"  - Federated rounds: {N_ROUNDS}")
     print(f"  - Rare variants: {N_RARE_VARIANTS}")
@@ -1136,47 +1007,19 @@ def main():
     print("\nGenerating comparison plots...")
     comparison.plot_results()
 
-    # Plot heterogeneity results
-    print("\nPlotting heterogeneity results...")
-    comparison.plot_heterogeneity_results()
-
     # Generate detailed report
     comparison.generate_detailed_report()
 
-    # Test rare variant performance
-    print("\nEvaluating rare variant prediction performance...")
-    test_model = HierarchicalPRSModel(n_rare_variants=N_RARE_VARIANTS)
-    test_data = comparison.client_datasets[0]  # Use first client's data for testing
-
-    rare_variant_metrics = evaluate_rare_variant_performance(
-        test_model, test_data, variant_threshold=5
-    )
-
-    print("\nRare Variant Performance Metrics:")
-    print("-" * 40)
-    for metric, value in rare_variant_metrics.items():
-        if metric != "error":
-            print(f"  {metric:20}: {value:.4f}")
-
     print("\n" + "=" * 80)
-    print("ANALYSIS COMPLETE!")
+    print("Execution completed successfully!")
     print("=" * 80)
-    print("\nKey Findings:")
-    print(
-        "  1. RV-FedPRS (FedCE) shows superior performance on rare variant prediction"
-    )
-    print("  2. Dynamic clustering successfully identifies population substructure")
-    print("  3. Asymmetric aggregation preserves local genetic signals")
-    print("  4. Framework is scalable and privacy-preserving")
-    print(
-        "\nRecommendation: Use RV-FedPRS for federated PRS with heterogeneous populations"
-    )
 
 
 if __name__ == "__main__":
-    # Check dependencies
     try:
-        print("All dependencies installed successfully!")
         main()
-    except ImportError as e:
-        exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+
+        traceback.print_exc()
