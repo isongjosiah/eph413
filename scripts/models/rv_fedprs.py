@@ -655,25 +655,28 @@ class FederatedComparison:
         self.run_strategy("FedCE", fedce_strategy)
 
     def plot_results(self):
-        """Generate comparison plots for different metrics."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        """Generate comparison plots for different metrics and save them as separate files."""
+        strategies = list(self.results.keys())
 
         # Plot 1: Training efficiency (time)
-        strategies = list(self.results.keys())
+        fig1, ax1 = plt.subplots(figsize=(8, 6))
         times = [
             self.results[s]["times"][0] if self.results[s]["times"] else 0
             for s in strategies
         ]
-
-        axes[0, 0].bar(strategies, times, color=["blue", "green", "red"])
-        axes[0, 0].set_title(
+        ax1.bar(strategies, times, color=["blue", "green", "red"])
+        ax1.set_title(
             "Computation Efficiency (Training Time)", fontsize=14, fontweight="bold"
         )
-        axes[0, 0].set_ylabel("Time (seconds)")
-        axes[0, 0].set_xlabel("Strategy")
-        axes[0, 0].grid(axis="y", alpha=0.3)
+        ax1.set_ylabel("Time (seconds)")
+        ax1.set_xlabel("Strategy")
+        ax1.grid(axis="y", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig("computation_efficiency.png")
+        plt.close(fig1)
 
         # Plot 2: Convergence curves (placeholder - would need actual tracking)
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
         rounds = np.arange(1, self.n_rounds + 1)
         for strategy in strategies:
             # Simulate convergence curves (in practice, track actual losses)
@@ -682,17 +685,21 @@ class FederatedComparison:
                 + 0.1
                 + np.random.normal(0, 0.01, len(rounds))
             )
-            axes[0, 1].plot(
+            ax2.plot(
                 rounds, simulated_loss, marker="o", label=strategy, linewidth=2
             )
 
-        axes[0, 1].set_title("Convergence Comparison", fontsize=14, fontweight="bold")
-        axes[0, 1].set_xlabel("Federated Round")
-        axes[0, 1].set_ylabel("Loss")
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
+        ax2.set_title("Convergence Comparison", fontsize=14, fontweight="bold")
+        ax2.set_xlabel("Federated Round")
+        ax2.set_ylabel("Loss")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig("convergence_comparison.png")
+        plt.close(fig2)
 
         # Plot 3: Model accuracy comparison
+        fig3, ax3 = plt.subplots(figsize=(8, 6))
         # Simulate accuracy scores for demonstration
         np.random.seed(42)
         general_accuracy = {
@@ -710,14 +717,14 @@ class FederatedComparison:
         x = np.arange(len(strategies))
         width = 0.35
 
-        bars1 = axes[1, 0].bar(
+        bars1 = ax3.bar(
             x - width / 2,
             [general_accuracy[s] for s in strategies],
             width,
             label="General Accuracy",
             color="skyblue",
         )
-        bars2 = axes[1, 0].bar(
+        bars2 = ax3.bar(
             x + width / 2,
             [rare_variant_accuracy[s] for s in strategies],
             width,
@@ -725,20 +732,20 @@ class FederatedComparison:
             color="coral",
         )
 
-        axes[1, 0].set_title("Accuracy Comparison", fontsize=14, fontweight="bold")
-        axes[1, 0].set_xlabel("Strategy")
-        axes[1, 0].set_ylabel("Accuracy")
-        axes[1, 0].set_xticks(x)
-        axes[1, 0].set_xticklabels(strategies)
-        axes[1, 0].legend()
-        axes[1, 0].grid(axis="y", alpha=0.3)
-        axes[1, 0].set_ylim([0.6, 1.0])
+        ax3.set_title("Accuracy Comparison", fontsize=14, fontweight="bold")
+        ax3.set_xlabel("Strategy")
+        ax3.set_ylabel("Accuracy")
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(strategies)
+        ax3.legend()
+        ax3.grid(axis="y", alpha=0.3)
+        ax3.set_ylim([0.6, 1.0])
 
         # Add value labels on bars
         for bars in [bars1, bars2]:
             for bar in bars:
                 height = bar.get_height()
-                axes[1, 0].annotate(
+                ax3.annotate(
                     f"{height:.3f}",
                     xy=(bar.get_x() + bar.get_width() / 2, height),
                     xytext=(0, 3),
@@ -746,38 +753,39 @@ class FederatedComparison:
                     ha="center",
                     va="bottom",
                 )
+        plt.tight_layout()
+        plt.savefig("accuracy_comparison.png")
+        plt.close(fig3)
 
         # Plot 4: Population-specific performance
+        fig4, ax4 = plt.subplots(figsize=(8, 6))
         populations = ["Population 1", "Population 2", "Population 3"]
         fedce_pop_performance = [0.85, 0.87, 0.89]
         fedavg_pop_performance = [0.78, 0.76, 0.77]
 
         x = np.arange(len(populations))
-        axes[1, 1].plot(
+        ax4.plot(
             x, fedce_pop_performance, "ro-", label="FedCE", linewidth=2, markersize=8
         )
-        axes[1, 1].plot(
+        ax4.plot(
             x, fedavg_pop_performance, "bs-", label="FedAvg", linewidth=2, markersize=8
         )
 
-        axes[1, 1].set_title(
+        ax4.set_title(
             "Population-Specific Performance", fontsize=14, fontweight="bold"
         )
-        axes[1, 1].set_xlabel("Population")
-        axes[1, 1].set_ylabel("Accuracy")
-        axes[1, 1].set_xticks(x)
-        axes[1, 1].set_xticklabels(populations)
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].set_ylim([0.7, 0.95])
-
-        plt.suptitle(
-            "RV-FedPRS Performance Comparison", fontsize=16, fontweight="bold", y=1.02
-        )
+        ax4.set_xlabel("Population")
+        ax4.set_ylabel("Accuracy")
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(populations)
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim([0.7, 0.95])
         plt.tight_layout()
-        plt.show()
+        plt.savefig("population_specific_performance.png")
+        plt.close(fig4)
 
-        return fig
+        print("Generated and saved all comparison plots.")
 
     def generate_detailed_report(self):
         """Generate a detailed comparison report."""
@@ -895,14 +903,13 @@ def evaluate_rare_variant_performance(
 
 def visualize_population_clustering(client_datasets: List[Dict]):
     """
-    Visualize the population structure and rare variant heterogeneity.
+    Visualize the population structure and rare variant heterogeneity, saving plots as separate files.
 
     Args:
         client_datasets: List of client datasets with population information
     """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
     # Plot 1: Rare variant distribution across populations
+    fig1, ax1 = plt.subplots(figsize=(8, 6))
     population_variants = {}
     for data in client_datasets:
         pop_id = data["population_id"]
@@ -910,12 +917,7 @@ def visualize_population_clustering(client_datasets: List[Dict]):
             population_variants[pop_id] = set()
         population_variants[pop_id].update(data["influential_variants"])
 
-    # Create Venn diagram-like visualization (simplified)
-    ax = axes[0]
     populations = list(population_variants.keys())
-    n_pops = len(populations)
-
-    # Count unique and shared variants
     variant_counts = []
     labels = []
     for i, pop in enumerate(populations):
@@ -926,28 +928,27 @@ def visualize_population_clustering(client_datasets: List[Dict]):
         variant_counts.append(len(unique_variants))
         labels.append(f"Pop {pop}\n(Unique)")
 
-    # Add shared variants
     all_shared = set.intersection(*[population_variants[p] for p in populations])
     variant_counts.append(len(all_shared))
     labels.append("Shared")
 
     colors = plt.cm.Set3(np.linspace(0, 1, len(variant_counts)))
-    ax.pie(
+    ax1.pie(
         variant_counts, labels=labels, colors=colors, autopct="%1.1f%%", startangle=90
     )
-    ax.set_title(
+    ax1.set_title(
         "Rare Variant Distribution Across Populations", fontsize=12, fontweight="bold"
     )
+    plt.tight_layout()
+    plt.savefig("rare_variant_distribution.png")
+    plt.close(fig1)
 
     # Plot 2: PCA visualization of genetic structure (simulated)
-    ax2 = axes[1]
+    fig2, ax2 = plt.subplots(figsize=(8, 6))
     np.random.seed(42)
-
     for data in client_datasets:
         pop_id = data["population_id"]
         n_samples = len(data["phenotype_binary"])
-
-        # Simulate PCA coordinates based on population
         if pop_id == 0:
             x = np.random.normal(0, 1, n_samples)
             y = np.random.normal(0, 1, n_samples)
@@ -960,7 +961,6 @@ def visualize_population_clustering(client_datasets: List[Dict]):
             x = np.random.normal(1.5, 1, n_samples)
             y = np.random.normal(-2, 1, n_samples)
             color = "green"
-
         ax2.scatter(x, y, alpha=0.6, c=color, label=f"Population {pop_id}", s=20)
 
     ax2.set_xlabel("PC1 (Simulated)")
@@ -968,12 +968,11 @@ def visualize_population_clustering(client_datasets: List[Dict]):
     ax2.set_title("Population Structure Visualization", fontsize=12, fontweight="bold")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
-
-    plt.suptitle(
-        "Genetic Heterogeneity in Federated Dataset", fontsize=14, fontweight="bold"
-    )
     plt.tight_layout()
-    plt.show()
+    plt.savefig("population_structure.png")
+    plt.close(fig2)
+
+    print("Generated and saved population clustering plots.")
 
 
 # ==================== Main Execution ====================
