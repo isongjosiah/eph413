@@ -29,6 +29,7 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from scripts.data.synthetic.genomic import GeneticDataGenerator
+from scripts.models.mia import MembershipInferenceAttack
 
 warnings.filterwarnings("ignore")
 
@@ -95,105 +96,7 @@ class HistoryTrackingStrategy(fl.server.strategy.Strategy):
         return self.strategy.evaluate(server_round, parameters)
 
 
-class HierarchicalPRSModel(nn.Module):
-    """
-    Hierarchical two-pathway neural network for modelling common and rare variant contributions.
-    Implements the architecture described in the RV-FedPRS methodology.
-    """
-
-    def __init__(
-        self,
-        n_rare_variants: int,
-        common_hidden_dim: int = 16,
-        rare_hidden_dim: int = 64,
-        dropout_rate: float = 0.2,
-    ):
-        super(HierarchicalPRSModel, self).__init__()
-
-        self.common_pathway = nn.Sequential(
-            nn.Linear(1, common_hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(common_hidden_dim),
-            nn.Dropout(dropout_rate),
-            nn.Linear(common_hidden_dim, common_hidden_dim // 2),
-            nn.ReLU(),
-        )
-
-        self.rare_pathway = nn.Sequential(
-            nn.Linear(n_rare_variants, rare_hidden_dim * 2),
-            nn.ReLU(),
-            nn.BatchNorm1d(rare_hidden_dim * 2),
-            nn.Dropout(dropout_rate),
-            nn.Linear(rare_hidden_dim * 2, rare_hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(rare_hidden_dim),
-            nn.Dropout(dropout_rate),
-            nn.Linear(rare_hidden_dim, rare_hidden_dim // 2),
-            nn.ReLU(),
-        )
-
-        integration_input_dim = common_hidden_dim // 2 + rare_hidden_dim // 2
-        self.integration_layer = nn.Sequential(
-            nn.Linear(integration_input_dim, 32),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(32, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(
-        self, prs_scores: torch.Tensor, rare_dosage: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Forward pass through the hierarchical model.
-
-        Args:
-            prs_scores: Common variant PRS scores (batch_size, 1)
-            rare_dosages: Rare variant dosages (batch_size, n_rare_variants)
-
-        Returns:
-            Predictions (batch_size, 1)
-        """
-
-        h_common = self.common_pathway(prs_scores)
-        h_rare = self.rare_pathway(rare_dosage)
-
-        h_combined = torch.cat([h_common, h_rare], dim=1)
-        output = self.integration_layer(h_combined)
-        return output
-
-    def get_pathway_gradients(
-        self,
-        prs_scores: torch.Tensor,
-        rare_dosages: torch.Tensor,
-        targets: torch.Tensor,
-    ) -> Dict:
-        """
-        Calculate gradients for each pathway to identify influential variants.
-
-        Returns:
-            Dictionary with gradient magnitudes for analysis
-        """
-        self.zero_grad()
-
-        # Enable gradient computation for inputs
-        prs_scores.requires_grad_(True)
-        rare_dosages.requires_grad_(True)
-
-        # Forward pass
-        outputs = self.forward(prs_scores, rare_dosages)
-
-        # Calculate loss
-        criterion = nn.BCELoss()
-        loss = criterion(outputs, targets)
-
-        # Backward pass
-        loss.backward()
-
-        # Get gradient magnitudes
-        rare_gradients = rare_dosages.grad.abs().mean(dim=0).detach().cpu().numpy()
-
-        return {"rare_variant_gradients": rare_gradients, "loss": loss.item()}
+from scripts.models.hprs_model import HierarchicalPRSModel
 
 
 class FlowerClient(fl.client.NumPyClient):
@@ -507,10 +410,10 @@ class FederatedComparison:
 
         # Store results
         self.results = {
-            "Centralized": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
-            "FedAvg": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
-            "FedProx": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
-            "FedCE": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
+            "Centralized": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": [], "mia": []},
+            "FedAvg": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": [], "mia": []},
+            "FedProx": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": [], "mia": []},
+            "FedCE": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": [], "mia": []},
         }
         self.final_models = {}
 
@@ -614,6 +517,7 @@ class FederatedComparison:
             "accuracies": [(self.n_rounds, accuracy)],
             "auprcs": [(self.n_rounds, auprc)],
             "times": [elapsed_time],
+            "mia": [],
         }
         self.final_models["Centralized"] = [
             val.cpu().numpy() for val in model.state_dict().values()
@@ -621,6 +525,54 @@ class FederatedComparison:
 
         print(f"Centralized training completed in {elapsed_time:.2f}s")
         print(f"Centralized accuracy: {accuracy:.4f}")
+
+    def run_mia_attack(self, strategy_name, target_model):
+        print(f"\nRunning Membership Inference Attack on {strategy_name} model...")
+        mia = MembershipInferenceAttack(n_rare_variants=self.n_rare_variants)
+        mia.train_shadow_models()
+        mia.train_attack_model()
+
+        # Prepare member and non-member data
+        if strategy_name == "Centralized":
+            all_prs_scores = np.concatenate(
+                [d["prs_scores"] for d in self.client_datasets]
+            )
+            all_rare_dosages = np.concatenate(
+                [d["rare_dosages"] for d in self.client_datasets]
+            )
+            all_phenotypes = np.concatenate(
+                [d["phenotype_binary"] for d in self.client_datasets]
+            )
+            prs_tensor = torch.FloatTensor(all_prs_scores.reshape(-1, 1))
+            rare_tensor = torch.FloatTensor(all_rare_dosages)
+            phenotype_tensor = torch.FloatTensor(all_phenotypes.reshape(-1, 1))
+            member_data = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
+        else:
+            all_prs_scores = np.concatenate(
+                [d["prs_scores"] for d in self.client_datasets]
+            )
+            all_rare_dosages = np.concatenate(
+                [d["rare_dosages"] for d in self.client_datasets]
+            )
+            all_phenotypes = np.concatenate(
+                [d["phenotype_binary"] for d in self.client_datasets]
+            )
+            prs_tensor = torch.FloatTensor(all_prs_scores.reshape(-1, 1))
+            rare_tensor = torch.FloatTensor(all_rare_dosages)
+            phenotype_tensor = torch.FloatTensor(all_phenotypes.reshape(-1, 1))
+            member_data = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
+
+        data_generator = GeneticDataGenerator(n_rare_variants=self.n_rare_variants)
+        non_member_datasets = data_generator.create_federated_datasets(n_clients=1)
+        non_member_shadow_data = non_member_datasets[0]
+        prs_tensor = torch.FloatTensor(non_member_shadow_data["prs_scores"].reshape(-1, 1))
+        rare_tensor = torch.FloatTensor(non_member_shadow_data["rare_dosages"])
+        phenotype_tensor = torch.FloatTensor(non_member_shadow_data["phenotype_binary"].reshape(-1, 1))
+        non_member_data = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
+
+        attack_accuracy = mia.run_attack(target_model, member_data, non_member_data)
+        self.results[strategy_name]["mia"].append(attack_accuracy)
+        print(f"  MIA Accuracy on {strategy_name}: {attack_accuracy:.3f}")
 
     def run_strategy(self, strategy_name: str, strategy_instance):
         print(f"\nRunning {strategy_name}...")
@@ -649,6 +601,12 @@ class FederatedComparison:
     def run_comparison(self):
         """Run comparison of all strategies."""
         self.run_centralized()
+        centralized_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+        params = self.final_models["Centralized"]
+        params_dict = zip(centralized_model.state_dict().keys(), params)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        centralized_model.load_state_dict(state_dict, strict=True)
+        self.run_mia_attack("Centralized", centralized_model)
 
         # Initial model for all strategies
         initial_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
@@ -670,6 +628,12 @@ class FederatedComparison:
             self.final_models["FedAvg"] = fl.common.parameters_to_ndarrays(
                 tracking_strategy.final_parameters
             )
+            fedavg_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+            params = self.final_models["FedAvg"]
+            params_dict = zip(fedavg_model.state_dict().keys(), params)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            fedavg_model.load_state_dict(state_dict, strict=True)
+            self.run_mia_attack("FedAvg", fedavg_model)
 
         # 2. FedProx
         fedprox_strategy = FedProx(
@@ -687,6 +651,12 @@ class FederatedComparison:
             self.final_models["FedProx"] = fl.common.parameters_to_ndarrays(
                 tracking_strategy.final_parameters
             )
+            fedprox_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+            params = self.final_models["FedProx"]
+            params_dict = zip(fedprox_model.state_dict().keys(), params)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            fedprox_model.load_state_dict(state_dict, strict=True)
+            self.run_mia_attack("FedProx", fedprox_model)
 
         # 3. FedCE (RV-FedPRS)
         fedce_strategy = FedCEStrategy(
@@ -697,14 +667,18 @@ class FederatedComparison:
             min_available_clients=2,
             evaluate_metrics_aggregation_fn=self.weighted_average,
         )
-        tracking_strategy = HistoryTrackingStrategy(
-            fedce_strategy, self.results["FedCE"]
-        )
+        tracking_strategy = HistoryTrackingStrategy(fedce_strategy, self.results["FedCE"])
         self.run_strategy("FedCE", tracking_strategy)
         if tracking_strategy.final_parameters:
             self.final_models["FedCE"] = fl.common.parameters_to_ndarrays(
                 tracking_strategy.final_parameters
             )
+            fedce_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+            params = self.final_models["FedCE"]
+            params_dict = zip(fedce_model.state_dict().keys(), params)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            fedce_model.load_state_dict(state_dict, strict=True)
+            self.run_mia_attack("FedCE", fedce_model)
 
     def plot_results(self):
         """Generate comparison plots for different metrics and save them as separate files."""
@@ -989,6 +963,12 @@ class FederatedComparison:
             auprc_diff = max(pop_auprcs) - min(pop_auprcs)
             print(f"\n  Accuracy Difference (Fairness): {acc_diff:.3f}")
             print(f"  AUPRC Difference (Fairness): {auprc_diff:.3f}")
+
+        print("\n6. MEMBERSHIP INFERENCE ATTACK")
+        print("-" * 40)
+        for strategy, data in self.results.items():
+            if data["mia"]:
+                print(f"{strategy:12} | Attack Accuracy: {data['mia'][0]:.3f}")
 
         print("\n" + "=" * 80)
 
