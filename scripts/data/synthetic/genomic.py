@@ -223,11 +223,11 @@ class GeneticDataGenerator:
 
     def __init__(
         self,
-        n_samples: int = 1000,
+        n_samples: int = 10000,
         n_common_variants: int = 100,
         n_rare_variants: int = 500,
         n_populations: int = 3,
-        rare_variant_freq: float = 0.01,
+        rare_variant_freq: float = 0.05,
     ):
         """
         Initialize genetic data generator.

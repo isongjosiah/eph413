@@ -20,6 +20,7 @@ from flwr.server.strategy import FedAvg, FedProx
 import warnings
 from collections import OrderedDict
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import average_precision_score
 import time
 import random
 from copy import deepcopy
@@ -37,40 +38,61 @@ torch.manual_seed(42)
 random.seed(42)
 
 
-class HistoryTrackingStrategy(fl.server.strategy.FedAvg):
+class HistoryTrackingStrategy(fl.server.strategy.Strategy):
     """A wrapper strategy that captures metrics/losses as they occur."""
 
     def __init__(self, base_strategy, history_dict):
-        super().__init__(
-            fraction_fit=base_strategy.strategy.fraction_fit,
-            fraction_evaluate=base_strategy.strategy.fraction_evaluate,
-            min_fit_clients=base_strategy.strategy.min_fit_clients,
-            min_evaluate_clients=base_strategy.strategy.min_evaluate_clients,
-            min_available_clients=base_strategy.strategy.min_available_clients,
-            evaluate_metrics_aggregation_fn=base_strategy.strategy.evaluate_metrics_aggregation_fn,
-        )
-        self.base_strategy = base_strategy
+        super().__init__()
+        self.strategy = base_strategy
         self.history = history_dict
+        self.final_parameters: Optional[Parameters] = None
 
-    def aggregate_fit(self, server_round, results, failures):
-        params, metrics = self.base_strategy.aggregate_fit(
-            server_round, results, failures
-        )
+    def initialize_parameters(
+        self, client_manager: ClientManager
+    ) -> Optional[Parameters]:
+        return self.strategy.initialize_parameters(client_manager)
+
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager: ClientManager
+    ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitIns]]:
+        return self.strategy.configure_fit(server_round, parameters, client_manager)
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, FitRes]],
+        failures,
+    ) -> Tuple[Optional[Parameters], Dict]:
+        params, metrics = self.strategy.aggregate_fit(server_round, results, failures)
+        if params is not None:
+            self.final_parameters = params
         if metrics:
             loss = metrics.get("loss", None)
             if loss is not None:
-                self.history["losses"].append((server_round, loss))
+                self.history["fit_losses"].append((server_round, loss))
         return params, metrics
 
+    def configure_evaluate(
+        self, server_round: int, parameters: Parameters, client_manager: ClientManager
+    ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateIns]]:
+        return self.strategy.configure_evaluate(
+            server_round, parameters, client_manager
+        )
+
     def aggregate_evaluate(self, server_round, results, failures):
-        aggregated_loss, metrics = self.base_strategy.aggregate_evaluate(
+        aggregated_loss, metrics = self.strategy.aggregate_evaluate(
             server_round, results, failures
         )
         if aggregated_loss is not None:
-            self.history["eval_losses"].append((server_round, aggregated_loss))
+            self.history["losses"].append((server_round, aggregated_loss))
         if metrics and "accuracy" in metrics:
             self.history["accuracies"].append((server_round, metrics["accuracy"]))
         return aggregated_loss, metrics
+
+    def evaluate(
+        self, server_round: int, parameters: Parameters
+    ) -> Optional[Tuple[float, Dict]]:
+        return self.strategy.evaluate(server_round, parameters)
 
 
 class HierarchicalPRSModel(nn.Module):
@@ -286,6 +308,8 @@ class FlowerClient(fl.client.NumPyClient):
         total_loss = 0.0
         correct = 0
         total = 0
+        all_targets = []
+        all_outputs = []
 
         with torch.no_grad():
             for prs, rare, targets in self.val_loader:
@@ -298,10 +322,14 @@ class FlowerClient(fl.client.NumPyClient):
                 correct += (predicted == targets).sum().item()
                 total += targets.size(0)
 
+                all_targets.extend(targets.cpu().numpy())
+                all_outputs.extend(outputs.cpu().numpy())
+
         accuracy = correct / total
         avg_loss = total_loss / len(self.val_loader)
+        auprc = average_precision_score(all_targets, all_outputs)
 
-        metrics = {"accuracy": accuracy, "client_id": float(self.client_id)}
+        metrics = {"accuracy": accuracy, "auprc": auprc, "client_id": float(self.client_id)}
 
         return avg_loss, len(self.val_loader.dataset), metrics
 
@@ -452,56 +480,6 @@ class FedCEStrategy(fl.server.strategy.FedAvg):
 # ==================== Comparison Framework ====================
 
 
-class StrategyWrapper(fl.server.strategy.Strategy):
-    def __init__(self, strategy: fl.server.strategy.Strategy):
-        super().__init__()
-        self.strategy = strategy
-        self.final_parameters: Optional[Parameters] = None
-
-    def initialize_parameters(
-        self, client_manager: ClientManager
-    ) -> Optional[Parameters]:
-        return self.strategy.initialize_parameters(client_manager)
-
-    def configure_fit(
-        self, server_round: int, parameters: Parameters, client_manager: ClientManager
-    ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitIns]]:
-        return self.strategy.configure_fit(server_round, parameters, client_manager)
-
-    def aggregate_fit(
-        self,
-        server_round: int,
-        results: List[Tuple[fl.server.client_proxy.ClientProxy, FitRes]],
-        failures,
-    ) -> Tuple[Optional[Parameters], Dict]:
-        aggregated_params, metrics = self.strategy.aggregate_fit(
-            server_round, results, failures
-        )
-        if aggregated_params is not None:
-            self.final_parameters = aggregated_params
-        return aggregated_params, metrics
-
-    def configure_evaluate(
-        self, server_round: int, parameters: Parameters, client_manager: ClientManager
-    ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.EvaluateIns]]:
-        return self.strategy.configure_evaluate(
-            server_round, parameters, client_manager
-        )
-
-    def aggregate_evaluate(
-        self,
-        server_round: int,
-        results: List[Tuple[fl.server.client_proxy.ClientProxy, EvaluateRes]],
-        failures,
-    ) -> Tuple[Optional[float], Dict]:
-        return self.strategy.aggregate_evaluate(server_round, results, failures)
-
-    def evaluate(
-        self, server_round: int, parameters: Parameters
-    ) -> Optional[Tuple[float, Dict]]:
-        return self.strategy.evaluate(server_round, parameters)
-
-
 class FederatedComparison:
     """
     Framework for comparing different federated learning strategies.
@@ -529,18 +507,20 @@ class FederatedComparison:
 
         # Store results
         self.results = {
-            "FedAvg": {"losses": [], "accuracies": [], "times": []},
-            "FedProx": {"losses": [], "accuracies": [], "times": []},
-            "FedCE": {"losses": [], "accuracies": [], "times": []},
+            "Centralized": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
+            "FedAvg": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
+            "FedProx": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
+            "FedCE": {"fit_losses": [], "losses": [], "accuracies": [], "auprcs": [], "times": []},
         }
         self.final_models = {}
 
     def weighted_average(self, metrics: List[Tuple[int, Metrics]]) -> Metrics:
         """Aggregate metrics using weighted average."""
         accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
+        auprcs = [num_examples * m["auprc"] for num_examples, m in metrics]
         examples = [num_examples for num_examples, m in metrics]
 
-        return {"accuracy": sum(accuracies) / sum(examples)}
+        return {"accuracy": sum(accuracies) / sum(examples), "auprc": sum(auprcs) / sum(examples)}
 
     def create_client_fn(self, strategy_name: str):
         """Create client function for Flower simulation."""
@@ -561,22 +541,97 @@ class FederatedComparison:
 
         return client_fn
 
+    def run_centralized(self):
+        """Train and evaluate a centralized model."""
+        print("\nRunning Centralized Training...")
+        start_time = time.time()
+
+        # 1. Combine all client datasets
+        all_prs_scores = np.concatenate(
+            [d["prs_scores"] for d in self.client_datasets]
+        )
+        all_rare_dosages = np.concatenate(
+            [d["rare_dosages"] for d in self.client_datasets]
+        )
+        all_phenotypes = np.concatenate(
+            [d["phenotype_binary"] for d in self.client_datasets]
+        )
+
+        prs_tensor = torch.FloatTensor(all_prs_scores.reshape(-1, 1))
+        rare_tensor = torch.FloatTensor(all_rare_dosages)
+        phenotype_tensor = torch.FloatTensor(all_phenotypes.reshape(-1, 1))
+
+        dataset = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+        # 2. Train the model
+        model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.BCELoss()
+
+        for epoch in range(self.n_rounds):  # Use n_rounds for comparable training time
+            model.train()
+            for prs, rare, targets in train_loader:
+                optimizer.zero_grad()
+                outputs = model(prs, rare)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+
+        # 3. Evaluate the model
+        model.eval()
+        correct = 0
+        total = 0
+        total_loss = 0
+        all_targets = []
+        all_outputs = []
+        with torch.no_grad():
+            for prs, rare, targets in val_loader:
+                outputs = model(prs, rare)
+                loss = criterion(outputs, targets)
+                total_loss += loss.item()
+                predicted = (outputs > 0.5).float()
+                total += targets.size(0)
+                correct += (predicted == targets).sum().item()
+                all_targets.extend(targets.cpu().numpy())
+                all_outputs.extend(outputs.cpu().numpy())
+
+        accuracy = correct / total
+        avg_loss = total_loss / len(val_loader)
+        auprc = average_precision_score(all_targets, all_outputs)
+
+        elapsed_time = time.time() - start_time
+
+        # 4. Store results
+        self.results["Centralized"] = {
+            "fit_losses": [],
+            "losses": [(self.n_rounds, avg_loss)],
+            "accuracies": [(self.n_rounds, accuracy)],
+            "auprcs": [(self.n_rounds, auprc)],
+            "times": [elapsed_time],
+        }
+        self.final_models["Centralized"] = [
+            val.cpu().numpy() for val in model.state_dict().values()
+        ]
+
+        print(f"Centralized training completed in {elapsed_time:.2f}s")
+        print(f"Centralized accuracy: {accuracy:.4f}")
+
     def run_strategy(self, strategy_name: str, strategy_instance):
         print(f"\nRunning {strategy_name}...")
         start_time = time.time()
-
-        # History container
-        history_data = {"losses": [], "eval_losses": [], "accuracies": []}
-
-        # Wrap the strategy
-        tracking_strategy = HistoryTrackingStrategy(strategy_instance, history_data)
 
         client_fn = self.create_client_fn(strategy_name)
 
         fl.simulation.run_simulation(
             server_app=fl.server.ServerApp(
                 config=fl.server.ServerConfig(num_rounds=self.n_rounds),
-                strategy=tracking_strategy,
+                strategy=strategy_instance,
             ),
             client_app=fl.client.ClientApp(client_fn=client_fn),
             num_supernodes=self.n_clients,
@@ -586,126 +641,15 @@ class FederatedComparison:
         elapsed_time = time.time() - start_time
         self.results[strategy_name]["times"].append(elapsed_time)
 
-        # Store collected history data
-        self.results[strategy_name]["losses"] = history_data["eval_losses"]
-        self.results[strategy_name]["accuracies"] = history_data["accuracies"]
-
         print(f"{strategy_name} completed in {elapsed_time:.2f}s")
         print(
-            f"Collected {len(history_data['eval_losses'])} evaluation losses and {len(history_data['accuracies'])} accuracies"
+            f"Collected {len(self.results[strategy_name]['losses'])} evaluation losses and {len(self.results[strategy_name]['accuracies'])} accuracies"
         )
-
-    # def run_strategy(self, strategy_name: str, strategy_instance):
-    #    """
-    #    Run federated learning with a specific strategy using Flower simulation API.
-    #    """
-    #    print(f"\nRunning {strategy_name}...")
-    #    start_time = time.time()
-
-    #    # Create client function
-    #    client_fn = self.create_client_fn(strategy_name)
-
-    #    try:
-    #        # Run simulation
-    #        history = fl.simulation.run_simulation(
-    #            server_app=fl.server.ServerApp(
-    #                config=fl.server.ServerConfig(num_rounds=self.n_rounds),
-    #                strategy=strategy_instance,
-    #            ),
-    #            client_app=fl.client.ClientApp(
-    #                client_fn=client_fn,
-    #            ),
-    #            num_supernodes=self.n_clients,
-    #            backend_config={
-    #                "client_resources": {
-    #                    "num_cpus": 1,
-    #                    "num_gpus": 0.0,
-    #                }
-    #            },
-    #        )
-
-    #        elapsed_time = time.time() - start_time
-    #        self.results[strategy_name]["times"].append(elapsed_time)
-
-    #        # Check if history is valid
-    #        if history is None:
-    #            print(f"WARNING: {strategy_name} returned None history")
-    #            return
-
-    #        # Debug: print available attributes
-    #        print(f"DEBUG: History attributes for {strategy_name}:")
-    #        print(
-    #            f"  - Has losses_distributed: {hasattr(history, 'losses_distributed')}"
-    #        )
-    #        print(
-    #            f"  - Has losses_centralized: {hasattr(history, 'losses_centralized')}"
-    #        )
-    #        print(
-    #            f"  - Has metrics_distributed: {hasattr(history, 'metrics_distributed')}"
-    #        )
-    #        print(
-    #            f"  - Has metrics_centralized: {hasattr(history, 'metrics_centralized')}"
-    #        )
-
-    #        # Extract metrics from history - try multiple sources
-    #        # Try distributed losses first (from evaluate on clients)
-    #        if hasattr(history, "losses_distributed") and history.losses_distributed:
-    #            self.results[strategy_name]["losses"] = [
-    #                loss for _, loss in history.losses_distributed
-    #            ]
-    #            print(
-    #                f"  - Found {len(self.results[strategy_name]['losses'])} distributed losses"
-    #            )
-
-    #        # Try centralized losses as fallback
-    #        elif hasattr(history, "losses_centralized") and history.losses_centralized:
-    #            self.results[strategy_name]["losses"] = [
-    #                loss for _, loss in history.losses_centralized
-    #            ]
-    #            print(
-    #                f"  - Found {len(self.results[strategy_name]['losses'])} centralized losses"
-    #            )
-
-    #        # Extract accuracies from distributed metrics
-    #        if hasattr(history, "metrics_distributed") and history.metrics_distributed:
-    #            if "accuracy" in history.metrics_distributed:
-    #                self.results[strategy_name]["accuracies"] = [
-    #                    acc for _, acc in history.metrics_distributed["accuracy"]
-    #                ]
-    #                print(
-    #                    f"  - Found {len(self.results[strategy_name]['accuracies'])} distributed accuracies"
-    #                )
-
-    #        # Try centralized metrics as fallback
-    #        elif (
-    #            hasattr(history, "metrics_centralized") and history.metrics_centralized
-    #        ):
-    #            if "accuracy" in history.metrics_centralized:
-    #                self.results[strategy_name]["accuracies"] = [
-    #                    acc for _, acc in history.metrics_centralized["accuracy"]
-    #                ]
-    #                print(
-    #                    f"  - Found {len(self.results[strategy_name]['accuracies'])} centralized accuracies"
-    #                )
-
-    #        print(f"{strategy_name} completed in {elapsed_time:.2f} seconds")
-
-    #        if self.results[strategy_name]["accuracies"]:
-    #            final_accuracy = self.results[strategy_name]["accuracies"][-1]
-    #            print(f"Final accuracy for {strategy_name}: {final_accuracy:.4f}")
-    #        else:
-    #            print(f"No accuracy metrics recorded for {strategy_name}")
-
-    #    except Exception as e:
-    #        print(f"ERROR in {strategy_name}: {str(e)}")
-    #        import traceback
-
-    #        traceback.print_exc()
-    #        elapsed_time = time.time() - start_time
-    #        self.results[strategy_name]["times"].append(elapsed_time)
 
     def run_comparison(self):
         """Run comparison of all strategies."""
+        self.run_centralized()
+
         # Initial model for all strategies
         initial_model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
         params = [val.cpu().numpy() for val in initial_model.state_dict().values()]
@@ -713,13 +657,18 @@ class FederatedComparison:
 
         # 1. FedAvg
         fedavg_strategy = FedAvg(
-            min_fit_clients=2, min_evaluate_clients=2, min_available_clients=2
+            min_fit_clients=2,
+            min_evaluate_clients=2,
+            min_available_clients=2,
+            evaluate_metrics_aggregation_fn=self.weighted_average,
         )
-        fedavg_wrapper = StrategyWrapper(fedavg_strategy)
-        self.run_strategy("FedAvg", fedavg_wrapper)
-        if fedavg_wrapper.final_parameters:
+        tracking_strategy = HistoryTrackingStrategy(
+            fedavg_strategy, self.results["FedAvg"]
+        )
+        self.run_strategy("FedAvg", tracking_strategy)
+        if tracking_strategy.final_parameters:
             self.final_models["FedAvg"] = fl.common.parameters_to_ndarrays(
-                fedavg_wrapper.final_parameters
+                tracking_strategy.final_parameters
             )
 
         # 2. FedProx
@@ -728,12 +677,15 @@ class FederatedComparison:
             min_evaluate_clients=2,
             min_available_clients=2,
             proximal_mu=0.1,
+            evaluate_metrics_aggregation_fn=self.weighted_average,
         )
-        fedprox_wrapper = StrategyWrapper(fedprox_strategy)
-        self.run_strategy("FedProx", fedprox_wrapper)
-        if fedprox_wrapper.final_parameters:
+        tracking_strategy = HistoryTrackingStrategy(
+            fedprox_strategy, self.results["FedProx"]
+        )
+        self.run_strategy("FedProx", tracking_strategy)
+        if tracking_strategy.final_parameters:
             self.final_models["FedProx"] = fl.common.parameters_to_ndarrays(
-                fedprox_wrapper.final_parameters
+                tracking_strategy.final_parameters
             )
 
         # 3. FedCE (RV-FedPRS)
@@ -743,12 +695,15 @@ class FederatedComparison:
             min_fit_clients=2,
             min_evaluate_clients=2,
             min_available_clients=2,
+            evaluate_metrics_aggregation_fn=self.weighted_average,
         )
-        fedce_wrapper = StrategyWrapper(fedce_strategy)
-        self.run_strategy("FedCE", fedce_wrapper)
-        if fedce_wrapper.final_parameters:
+        tracking_strategy = HistoryTrackingStrategy(
+            fedce_strategy, self.results["FedCE"]
+        )
+        self.run_strategy("FedCE", tracking_strategy)
+        if tracking_strategy.final_parameters:
             self.final_models["FedCE"] = fl.common.parameters_to_ndarrays(
-                fedce_wrapper.final_parameters
+                tracking_strategy.final_parameters
             )
 
     def plot_results(self):
@@ -761,7 +716,8 @@ class FederatedComparison:
             self.results[s]["times"][0] if self.results[s]["times"] else 0
             for s in strategies
         ]
-        ax1.bar(strategies, times, color=["blue", "green", "red"])
+        colors = ["purple", "blue", "green", "red"]
+        ax1.bar(strategies, times, color=colors)
         ax1.set_title(
             "Computation Efficiency (Training Time)", fontsize=14, fontweight="bold"
         )
@@ -775,6 +731,8 @@ class FederatedComparison:
         # Plot 2: Convergence curves
         fig2, ax2 = plt.subplots(figsize=(8, 6))
         for strategy in strategies:
+            if strategy == "Centralized":
+                continue
             if self.results[strategy]["losses"]:
                 rounds = [item[0] for item in self.results[strategy]["losses"]]
                 losses = [item[1] for item in self.results[strategy]["losses"]]
@@ -921,19 +879,31 @@ class FederatedComparison:
             if data["times"]:
                 print(f"{strategy:12} | Training Time: {data['times'][0]:.2f} seconds")
 
-        print("\n2. MODEL ACCURACY")
+        print("\n2. MODEL ACCURACY & AUPRC")
         print("-" * 40)
-        # Simulated final accuracies
-        accuracies = {
-            "FedAvg": {"general": 0.82, "rare": 0.75},
-            "FedProx": {"general": 0.83, "rare": 0.77},
-            "FedCE": {"general": 0.86, "rare": 0.88},
-        }
+        for strategy, data in self.results.items():
+            if data["accuracies"]:
+                final_accuracy = data["accuracies"][-1][1]
+                final_auprc = data["auprcs"][-1][1] if data.get("auprcs") else 0.0
 
-        for strategy, acc in accuracies.items():
-            print(
-                f"{strategy:12} | General: {acc['general']:.3f} | Rare Variants: {acc['rare']:.3f}"
-            )
+                # Evaluate rare variant performance
+                model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+                params = self.final_models[strategy]
+                params_dict = zip(model.state_dict().keys(), params)
+                state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+                model.load_state_dict(state_dict, strict=True)
+
+                # a test dataset is needed here. I can use one of the client datasets.
+                test_data = self.client_datasets[0]
+                rare_variant_metrics = evaluate_rare_variant_performance(
+                    model, test_data, variant_threshold=5
+                )
+                rare_accuracy = rare_variant_metrics.get("accuracy", 0.0)
+                rare_auprc = rare_variant_metrics.get("auprc", 0.0)
+
+                print(
+                    f"{strategy:12} | General Acc: {final_accuracy:.3f} | General AUPRC: {final_auprc:.3f} | Rare Variants Acc: {rare_accuracy:.3f} | Rare Variants AUPRC: {rare_auprc:.3f}"
+                )
 
         print("\n3. KEY ADVANTAGES OF RV-FedPRS (FedCE)")
         print("-" * 40)
@@ -995,6 +965,7 @@ def evaluate_rare_variant_performance(
         # Calculate metrics
         predictions = (outputs > 0.5).float()
         accuracy = (predictions == targets).float().mean().item()
+        auprc = average_precision_score(targets.cpu().numpy(), outputs.cpu().numpy())
 
         # Calculate sensitivity and specificity
         true_positives = ((predictions == 1) & (targets == 1)).sum().item()
@@ -1015,10 +986,11 @@ def evaluate_rare_variant_performance(
 
     return {
         "accuracy": accuracy,
+        "auprc": auprc,
         "sensitivity": sensitivity,
         "specificity": specificity,
         "n_samples": high_burden_mask.sum().item(),
-        "mean_rare_burden": rare_burden[high_burden_mask].mean().item(),
+        "mean_rare_burden": rare_burden[high_burden_mask].float().mean().item(),
     }
 
 
@@ -1109,9 +1081,9 @@ def main():
     print("=" * 80)
 
     # Set up parameters
-    N_CLIENTS = 10
-    N_ROUNDS = 50  # Reduced for demo
-    N_RARE_VARIANTS = 100
+    N_CLIENTS = 6
+    N_ROUNDS = 10  # Reduced for demo
+    N_RARE_VARIANTS = 500
 
     print(f"\nConfiguration:")
     print(f"  - Number of clients: {N_CLIENTS}")
