@@ -1109,9 +1109,9 @@ def main():
     print("=" * 80)
 
     # Set up parameters
-    N_CLIENTS = 6
-    N_ROUNDS = 500  # Reduced for demo
-    N_RARE_VARIANTS = 500
+    N_CLIENTS = 10
+    N_ROUNDS = 50  # Reduced for demo
+    N_RARE_VARIANTS = 100
 
     print(f"\nConfiguration:")
     print(f"  - Number of clients: {N_CLIENTS}")
@@ -1157,20 +1157,8 @@ def main():
     for metric, value in rare_variant_metrics.items():
         if metric != "error":
             print(f"  {metric:20}: {value:.4f}")
-
-    print("\n" + "=" * 80)
-    print("ANALYSIS COMPLETE!")
-    print("=" * 80)
-    print("\nKey Findings:")
-    print(
-        "  1. RV-FedPRS (FedCE) shows superior performance on rare variant prediction"
-    )
-    print("  2. Dynamic clustering successfully identifies population substructure")
-    print("  3. Asymmetric aggregation preserves local genetic signals")
-    print("  4. Framework is scalable and privacy-preserving")
-    print(
-        "\nRecommendation: Use RV-FedPRS for federated PRS with heterogeneous populations"
-    )
+        else:
+            print(f"{metric} {value}")
 
 
 if __name__ == "__main__":
