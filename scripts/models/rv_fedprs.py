@@ -810,6 +810,32 @@ class FederatedComparison:
 
         return correct / total if total > 0 else 0
 
+    def evaluate_model_on_data_for_fairness(self, model, data):
+        model.eval()
+        prs_tensor = torch.FloatTensor(data["prs_scores"].reshape(-1, 1))
+        rare_tensor = torch.FloatTensor(data["rare_dosages"])
+        phenotype_tensor = torch.FloatTensor(data["phenotype_binary"].reshape(-1, 1))
+
+        dataset = TensorDataset(prs_tensor, rare_tensor, phenotype_tensor)
+        loader = DataLoader(dataset, batch_size=32)
+
+        correct = 0
+        total = 0
+        all_targets = []
+        all_outputs = []
+        with torch.no_grad():
+            for prs, rare, targets in loader:
+                outputs = model(prs, rare)
+                predicted = (outputs > 0.5).float()
+                total += targets.size(0)
+                correct += (predicted == targets).sum().item()
+                all_targets.extend(targets.cpu().numpy())
+                all_outputs.extend(outputs.cpu().numpy())
+
+        accuracy = correct / total if total > 0 else 0
+        auprc = average_precision_score(all_targets, all_outputs)
+        return {"accuracy": accuracy, "auprc": auprc}
+
     def plot_heterogeneity_results(self):
         """Plot how each strategy performs on different population clusters."""
 
@@ -922,6 +948,47 @@ class FederatedComparison:
         print("  FedCE successfully identified 3 distinct population clusters")
         print("  Cluster-specific models maintained for rare variant pathways")
         print("  Common variant backbone shared globally for efficiency")
+
+        print("\n5. FAIRNESS EVALUATION (PERFORMANCE ACROSS POPULATIONS)")
+        print("-" * 40)
+
+        population_datasets = {}
+        for i, dataset in enumerate(self.client_datasets):
+            pop_id = dataset["population_id"]
+            if pop_id not in population_datasets:
+                population_datasets[pop_id] = []
+            population_datasets[pop_id].append(dataset)
+
+        population_ids = sorted(population_datasets.keys())
+        
+        for strategy_name, params in self.final_models.items():
+            print(f"\n--- Strategy: {strategy_name} ---")
+            model = HierarchicalPRSModel(n_rare_variants=self.n_rare_variants)
+            params_dict = zip(model.state_dict().keys(), params)
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            model.load_state_dict(state_dict, strict=True)
+
+            pop_accuracies = []
+            pop_auprcs = []
+            for pop_id in population_ids:
+                pop_acc = []
+                pop_apr = []
+                for client_data in population_datasets[pop_id]:
+                    metrics = self.evaluate_model_on_data_for_fairness(model, client_data)
+                    pop_acc.append(metrics["accuracy"])
+                    pop_apr.append(metrics["auprc"])
+                
+                mean_acc = np.mean(pop_acc)
+                mean_auprc = np.mean(pop_apr)
+                pop_accuracies.append(mean_acc)
+                pop_auprcs.append(mean_auprc)
+                print(f"  Population {pop_id}: Accuracy = {mean_acc:.3f}, AUPRC = {mean_auprc:.3f}")
+
+            # Fairness metrics
+            acc_diff = max(pop_accuracies) - min(pop_accuracies)
+            auprc_diff = max(pop_auprcs) - min(pop_auprcs)
+            print(f"\n  Accuracy Difference (Fairness): {acc_diff:.3f}")
+            print(f"  AUPRC Difference (Fairness): {auprc_diff:.3f}")
 
         print("\n" + "=" * 80)
 
