@@ -1,0 +1,5 @@
+Attack Type,Clean AUC,FedAvg AUC,FedAvg Degradation,Secure RV-FedPRS AUC,Secure Degradation,Detection Accuracy,RV Signal Preserved,Overhead
+label_flipping,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.2381232253169265
+gradient_poisoning,0.5,0.5,0.0,0.5,0.0,100.0,0.0,1.0007270782047613
+sybil,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.1857442654207755
+backdoor,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.152380996500477

@@ -315,6 +315,7 @@ class GeneticDataGenerator:
         influential_variants = set(np.where(rare_variant_mask == 1)[0])
 
         return {
+            "common_genotypes": common_genotypes.astype(np.float32),
             "prs_scores": prs_scores.astype(np.float32),
             "rare_dosages": rare_dosages.astype(np.float32),
             "phenotype_continuous": phenotype.astype(np.float32),
@@ -348,6 +349,19 @@ class GeneticDataGenerator:
             client_datasets.append(data)
 
         return client_datasets
+
+    def generate_test_set(self, n_samples: int) -> Dict:
+        """
+        Generate a test set.
+
+        Args:
+            n_samples: Number of samples to generate.
+
+        Returns:
+            Dictionary containing test data.
+        """
+        self.n_samples = n_samples
+        return self.generate_population_data(population_id=self.n_populations)
 
 
 if __name__ == "__main__":

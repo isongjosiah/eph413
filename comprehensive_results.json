@@ -1,0 +1,110 @@
+{
+    "label_flipping": {
+        "auc_clean": 0.5,
+        "clean_time": 11.624561548233032,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.3464035533809593
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.2381232253169265
+        }
+    },
+    "gradient_poisoning": {
+        "auc_clean": 0.5,
+        "clean_time": 13.999272584915161,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.0450935462612705
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 100.0,
+            "overhead": 1.0007270782047613
+        }
+    },
+    "sybil": {
+        "auc_clean": 0.5,
+        "clean_time": 14.430111646652222,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.05355428049324
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.1857442654207755
+        }
+    },
+    "backdoor": {
+        "auc_clean": 0.5,
+        "clean_time": 13.587010145187378,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.0647257966411239
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.152380996500477
+        }
+    }
+}
