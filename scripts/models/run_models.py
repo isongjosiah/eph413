@@ -13,6 +13,7 @@ from scripts.models.federated_server import run_federated_simulation
 from scripts.models.mia import MembershipInferenceAttack
 from scripts.models.hprs_model import HierarchicalPRSModel
 from scripts.data.synthetic.genomic import GeneticDataGenerator
+from scripts.explainability.explain import explain_central_model
 
 
 def run_central_model():
@@ -41,6 +42,7 @@ def run_central_model():
 
     print("Centralized Model Metrics:", metrics)
 
+
 def run_federated_experiments():
     """Runs federated learning experiments with different strategies."""
     strategies = ["FedAvg", "FedProx", "FedAdam", "FedYogi", "FedAdagrad"]
@@ -56,6 +58,7 @@ def run_federated_experiments():
     for strategy, history in results.items():
         print(f"Strategy: {strategy}")
         print(history)
+
 
 def run_mia_experiment():
     """
@@ -103,7 +106,7 @@ def run_mia_experiment():
 
     # 4. Run the attack
     print("Running the attack on the target model...")
-.    attack_accuracy = mia.run_attack(target_model, member_data, non_member_data)
+    attack_accuracy = mia.run_attack(target_model, member_data, non_member_data)
 
     # 5. Report the results
     report = f"""
@@ -120,5 +123,13 @@ def run_mia_experiment():
     with open("federated_report.txt", "a") as f:
         f.write(report)
 
+
+def run_explainability():
+    """
+    Runs the explainability analysis on the central model.
+    """
+    explain_central_model()
+
+
 if __name__ == "__main__":
-    run_mia_experiment()
+    run_explainability()

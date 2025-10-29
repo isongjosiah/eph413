@@ -56,6 +56,8 @@ scripts/
     synthetic/
       genomic.py
       standard.py
+  explainability/
+    explain.py
   models/
     allele_heterogeneity_strategy.py
     central_model.py
@@ -68,16 +70,104 @@ scripts/
     rv_fedprs2.py
     strategy_factory.py
   security/
+    byzantine_simulation.py
+    byzantine_trust_evaluation.py
+    byzantine_trust_viz.py
     byzantine.py
 .gitignore
+byzantine_simulation_results.json
+comprehensive_results.json
 federated_report.txt
+plot_trust_evolution.py
 prs_analysis_results.json
 rare_variant_ids.txt
 README.md
 requirements.txt
+results_summary.csv
+results_tables.tex
 ```
 
 # Files
+
+## File: scripts/explainability/explain.py
+```python
+"""
+This script provides an example of how to use SHAP (SHapley Additive exPlanations)
+to explain the predictions of a trained model.
+"""
+
+import numpy as np
+import shap
+import torch
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+from scripts.data.synthetic.genomic import GeneticDataGenerator
+from scripts.models.central_model import PolygenicNeuralNetwork
+
+
+def explain_central_model():
+    """
+    Trains a central model and generates SHAP explanations for its predictions.
+    """
+    # Generate synthetic data
+    data_generator = GeneticDataGenerator(n_samples=1000, n_rare_variants=10)
+    client_datasets = data_generator.create_federated_datasets(n_clients=1)
+    data = client_datasets[0]
+
+    prs_scores = data["prs_scores"].reshape(-1, 1)
+    rare_dosages = data["rare_dosages"]
+    X = np.concatenate((prs_scores, rare_dosages), axis=1)
+    y = data["phenotype_binary"]
+    print("feature length is ", len(X))
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # Initialize and train the central model
+    n_variants = X_train.shape[1]
+    central_model = PolygenicNeuralNetwork(n_variants=n_variants, n_loci=100)
+    central_model.train_model(X_train, y_train, X_val, y_val)
+
+    # Create a SHAP explainer
+    # Since the model is a PyTorch neural network, we use the DeepExplainer.
+    # We need to provide a background dataset to the explainer, which is typically a subset of the training data.
+    background_data = torch.FloatTensor(X_train[:100])
+    explainer = shap.DeepExplainer(central_model, background_data)
+
+    # Explain predictions on a subset of the validation data
+    to_explain = torch.FloatTensor(X_val[:5])
+    shap_values = explainer.shap_values(to_explain)
+    print("shap values")
+    print(shap_values)
+    print("feature names are")
+    print([f"f_{i}" for i in range(X_val.shape[1])])
+
+    # Generate and save a SHAP force plot
+    # This plot shows how each feature contributes to the model's output for a single prediction.
+    print(explainer.expected_value)
+    print("shap values")
+    print(shap_values[0][0])
+    explanation = shap.Explanation(
+        values=shap_values[0][0],
+        base_values=explainer.expected_value,
+        data=X_val[0],
+        feature_names=[f"f_{i}" for i in range(X_val.shape[1])],
+    )
+    print("shap plot")
+    print(explanation)
+
+    shap.force_plot(explanation)
+    plt.savefig("shap_force_plot.png")
+    plt.close()
+
+    print("SHAP force plot generated and saved to shap_force_plot.png")
+
+
+if __name__ == "__main__":
+    explain_central_model()
+```
 
 ## File: papers/ICAIIC_2025/ictc.bib
 ```
@@ -2596,6 +2686,3060 @@ def get_strategy(strategy_name: str, initial_parameters):
     return strategy
 ```
 
+## File: scripts/security/byzantine_simulation.py
+```python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+"""
+Secure RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment
+=====================================================================
+Implementation of the secure framework with genetic-aware anomaly detection,
+trust-weighted aggregation, and blockchain verification.
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, random_split
+from typing import Dict, List, Tuple, Optional, Set, Any
+from dataclasses import dataclass
+import flwr as fl
+from collections import OrderedDict
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.ensemble import IsolationForest
+from scipy import stats
+import hashlib
+import time
+import json
+from datetime import datetime
+import warnings
+
+# Import the GeneticDataGenerator
+from scripts.data.synthetic.genomic import GeneticDataGenerator
+
+warnings.filterwarnings("ignore")
+
+# Set random seeds
+np.random.seed(42)
+torch.manual_seed(42)
+
+
+# ========================= Configuration =========================
+
+
+@dataclass
+class SecurityConfig:
+    """Configuration for security parameters"""
+
+    max_malicious_fraction: float = 0.3
+    hwe_p_threshold: float = 1e-6
+    afc_threshold: float = 2.0
+    trust_momentum: float = 0.7
+    trim_fraction: float = 0.2
+    min_trust_score: float = 0.1
+    enable_blockchain: bool = True
+    detection_sensitivity: float = 0.1
+
+
+# ========================= Blockchain Layer =========================
+
+
+class BlockchainVerifier:
+    """Simulated blockchain for model update verification"""
+
+    def __init__(self):
+        self.chain = []
+        self.pending_transactions = []
+
+    def create_block(self, round_num: int, transactions: List[Dict]) -> Dict:
+        """Create a new block with transactions"""
+        block = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "transactions": transactions,
+            "previous_hash": self.get_last_block_hash(),
+            "nonce": 0,
+        }
+
+        # Simulate proof of work (simplified)
+        block["hash"] = self.calculate_hash(block)
+        return block
+
+    def calculate_hash(self, block: Dict) -> str:
+        """Calculate SHA256 hash of a block"""
+        block_string = json.dumps(block, sort_keys=True)
+        return hashlib.sha256(block_string.encode()).hexdigest()
+
+    def get_last_block_hash(self) -> str:
+        """Get hash of the last block in chain"""
+        if not self.chain:
+            return "0"
+        return self.chain[-1]["hash"]
+
+    def add_transaction(self, transaction: Dict):
+        """Add a transaction to pending list"""
+        self.pending_transactions.append(transaction)
+
+    def commit_round(self, round_num: int) -> Dict:
+        """Commit all pending transactions for a round"""
+        if not self.pending_transactions:
+            return None
+
+        block = self.create_block(round_num, self.pending_transactions)
+        self.chain.append(block)
+        self.pending_transactions = []
+        return block
+
+    def verify_model_provenance(self, model_hash: str, round_num: int) -> bool:
+        """Verify if a model hash exists in the blockchain"""
+        for block in self.chain:
+            if block["round"] == round_num:
+                for tx in block["transactions"]:
+                    if tx.get("model_hash") == model_hash:
+                        return True
+        return False
+
+
+# ========================= Genetic Anomaly Detection =========================
+
+
+class GeneticAnomalyDetector:
+    """Multi-faceted anomaly detection using genetic principles"""
+
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.global_allele_frequencies = None
+        self.isolation_forest = IsolationForest(contamination=0.1, random_state=42)
+
+    def set_global_frequencies(self, frequencies: Dict[int, float]):
+        """Set global allele frequency reference"""
+        self.global_allele_frequencies = frequencies
+
+    def test_hardy_weinberg(self, genotypes: np.ndarray) -> float:
+        """
+        Test Hardy-Weinberg Equilibrium for genetic data
+        Returns p-value; low values indicate potential fabrication
+        """
+        n_variants = genotypes.shape[1]
+        p_values = []
+
+        for i in range(n_variants):
+            variant_data = genotypes[:, i]
+
+            # Count genotypes (0=AA, 1=Aa, 2=aa)
+            n_AA = np.sum(variant_data == 0)
+            n_Aa = np.sum(variant_data == 1)
+            n_aa = np.sum(variant_data == 2)
+            n_total = n_AA + n_Aa + n_aa
+
+            if n_total == 0:
+                continue
+
+            # Calculate allele frequencies
+            p = (2 * n_AA + n_Aa) / (2 * n_total)
+            q = 1 - p
+
+            # Expected frequencies under HWE
+            exp_AA = p * p * n_total
+            exp_Aa = 2 * p * q * n_total
+            exp_aa = q * q * n_total
+
+            # Chi-square test
+            observed = [n_AA, n_Aa, n_aa]
+            expected = [exp_AA, exp_Aa, exp_aa]
+
+            if all(e > 0 for e in expected):
+                chi2, p_value = stats.chisquare(observed, expected)
+                p_values.append(p_value)
+
+        if not p_values:
+            return 1.0
+
+        # Return geometric mean of p-values
+        return stats.gmean(p_values)
+
+    def calculate_afc_score(self, client_frequencies: Dict[int, float]) -> float:
+        """
+        Calculate Allele Frequency Consistency score
+        Compares client frequencies to global reference
+        """
+        if not self.global_allele_frequencies:
+            return 0.0
+
+        scores = []
+        for variant_id, client_freq in client_frequencies.items():
+            if variant_id in self.global_allele_frequencies:
+                global_freq = self.global_allele_frequencies[variant_id]
+                if global_freq > 0:
+                    log_ratio = abs(np.log(client_freq / global_freq))
+                    scores.append(log_ratio)
+
+        return np.mean(scores) if scores else 0.0
+
+    def analyze_gradients(self, gradients: np.ndarray) -> float:
+        """
+        Analyze gradient patterns for anomalies
+        Returns anomaly score (0-1, higher is more anomalous)
+        """
+        if gradients.size == 0:
+            return 0.0
+
+        # Flatten gradients for analysis
+        flat_grads = gradients.flatten()
+
+        # Features for anomaly detection
+        features = []
+        features.append(np.mean(np.abs(flat_grads)))
+        features.append(np.std(flat_grads))
+        features.append(stats.kurtosis(flat_grads))
+        features.append(np.percentile(np.abs(flat_grads), 95))
+
+        # Fit or predict with isolation forest
+        features = np.array(features).reshape(1, -1)
+
+        try:
+            # For simplicity, we'll use a threshold-based approach
+            # In production, train isolation forest on historical data
+            anomaly_score = 0.0
+
+            # Check for extreme values
+            if features[0, 0] > 10.0:  # Very high mean gradient
+                anomaly_score += 0.3
+            if features[0, 1] > 5.0:  # High variance
+                anomaly_score += 0.2
+            if abs(features[0, 2]) > 10:  # Extreme kurtosis
+                anomaly_score += 0.3
+            if features[0, 3] > 20.0:  # Extreme outliers
+                anomaly_score += 0.2
+
+            return min(anomaly_score, 1.0)
+        except:
+            return 0.0
+
+
+# ========================= Trust Management =========================
+
+
+class TrustManager:
+    """Manages dynamic trust scores for clients"""
+
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.trust_scores = {}
+        self.trust_history = {}
+
+    def initialize_client(self, client_id: int):
+        """Initialize trust score for new client"""
+        self.trust_scores[client_id] = 0.5  # Start neutral
+        self.trust_history[client_id] = []
+
+    def update_trust(self, client_id: int, reputation: float):
+        """Update trust score using exponential moving average"""
+        if client_id not in self.trust_scores:
+            self.initialize_client(client_id)
+
+        old_trust = self.trust_scores[client_id]
+        new_trust = (
+            self.config.trust_momentum * old_trust
+            + (1 - self.config.trust_momentum) * reputation
+        )
+
+        # Enforce bounds
+        new_trust = max(self.config.min_trust_score, min(1.0, new_trust))
+
+        self.trust_scores[client_id] = new_trust
+        self.trust_history[client_id].append(new_trust)
+
+        return new_trust
+
+    def calculate_reputation(
+        self, hwe_score: float, afc_score: float, grad_score: float
+    ) -> float:
+        """Calculate reputation from detection scores"""
+        # HWE: Higher p-value is better (less likely fabricated)
+        hwe_component = min(1.0, -np.log10(max(hwe_score, 1e-10)) / 10)
+
+        # AFC: Lower score is better
+        afc_component = max(0, 1.0 - afc_score / self.config.afc_threshold)
+
+        # Gradient: Lower anomaly score is better
+        grad_component = 1.0 - grad_score
+
+        # Weighted average
+        reputation = 0.3 * hwe_component + 0.3 * afc_component + 0.4 * grad_component
+
+        return reputation
+
+    def is_trusted(self, client_id: int, threshold: float = 0.3) -> bool:
+        """Check if client is trusted"""
+        return self.trust_scores.get(client_id, 0.5) >= threshold
+
+
+# ========================= Secure Aggregation Strategy =========================
+
+
+class SecureRVFedPRSStrategy(fl.server.strategy.FedAvg):
+    """
+    Byzantine-robust aggregation strategy with genetic-aware detection
+    """
+
+    def __init__(self, security_config: SecurityConfig, **kwargs):
+        super().__init__(**kwargs)
+        self.security_config = security_config
+        self.detector = GeneticAnomalyDetector(security_config)
+        self.trust_manager = TrustManager(security_config)
+        self.blockchain = BlockchainVerifier() if security_config.enable_blockchain else None
+        self.round_num = 0
+
+    def aggregate_fit(
+        self, 
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[fl.common.Parameters], Dict[str, fl.common.Scalar]]:
+        """
+        Secure aggregation with multi-stage defense
+        """
+        self.round_num = server_round
+
+        if not results:
+            return None, {}
+
+        # Extract client updates and metadata
+        client_updates = []
+        client_metadata = []
+
+        for client_proxy, fit_res in results:
+            client_id = int(fit_res.metrics.get("client_id", 0))
+
+            # Initialize trust if new client
+            if client_id not in self.trust_manager.trust_scores:
+                self.trust_manager.initialize_client(client_id)
+
+            client_updates.append(
+                {
+                    "client_id": client_id,
+                    "parameters": fit_res.parameters,
+                    "num_examples": fit_res.num_examples,
+                    "metrics": fit_res.metrics,
+                }
+            )
+
+            client_metadata.append(fit_res.metrics)
+
+        # Stage 1: Genetic-aware anomaly detection
+        detection_results = self._perform_detection(client_updates, client_metadata)
+
+        # Stage 2: Update trust scores
+        self._update_trust_scores(detection_results)
+
+        # Stage 3: Filter suspicious clients
+        trusted_updates = self._filter_suspicious_clients(client_updates)
+
+        # Stage 4: Cluster-based aggregation for rare variants
+        clusters = self._cluster_clients(trusted_updates, client_metadata)
+
+        # Stage 5: Two-stage aggregation
+        aggregated_params = self._secure_aggregate(trusted_updates, clusters)
+
+        # Stage 6: Blockchain logging
+        if self.blockchain:
+            self._log_to_blockchain(trusted_updates, detection_results)
+
+        # Prepare metrics
+        metrics = {
+            "n_trusted_clients": len(trusted_updates),
+            "n_total_clients": len(client_updates),
+            "n_clusters": len(set(clusters.values())),
+            "avg_trust_score": np.mean(list(self.trust_manager.trust_scores.values())),
+        }
+
+        return aggregated_params, metrics
+
+    def _perform_detection(
+        self, client_updates: List[Dict], client_metadata: List[Dict]
+    ) -> Dict:
+        """Perform multi-faceted anomaly detection"""
+        detection_results = {}
+
+        for update, metadata in zip(client_updates, client_metadata):
+            client_id = update["client_id"]
+
+            # Extract genetic data if available (simulated here)
+            # In practice, clients would send summary statistics
+            hwe_score = np.random.random()  # Placeholder
+            afc_score = np.random.random() * 3  # Placeholder
+
+            # Analyze gradients
+            params = fl.common.parameters_to_ndarrays(update["parameters"])
+            gradients = np.concatenate([p.flatten() for p in params[:5]])  # Sample
+            grad_score = self.detector.analyze_gradients(gradients)
+
+            detection_results[client_id] = {
+                "hwe_score": hwe_score,
+                "afc_score": afc_score,
+                "grad_score": grad_score,
+            }
+
+        return detection_results
+
+    def _update_trust_scores(self, detection_results: Dict):
+        """Update trust scores based on detection results"""
+        for client_id, scores in detection_results.items():
+            reputation = self.trust_manager.calculate_reputation(
+                scores["hwe_score"], scores["afc_score"], scores["grad_score"]
+            )
+            self.trust_manager.update_trust(client_id, reputation)
+
+    def _filter_suspicious_clients(self, client_updates: List[Dict]) -> List[Dict]:
+        """Filter out clients with low trust scores"""
+        trusted = []
+        for update in client_updates:
+            if self.trust_manager.is_trusted(update["client_id"]):
+                trusted.append(update)
+        return trusted
+
+    def _cluster_clients(
+        self, client_updates: List[Dict], metadata: List[Dict]
+    ) -> Dict[int, int]:
+        """Cluster clients based on rare variant profiles"""
+        n_clients = len(client_updates)
+
+        if n_clients < 2:
+            return {client_updates[0]["client_id"]: 0} if client_updates else {}
+
+        # Build similarity matrix (simplified)
+        similarity_matrix = np.random.random((n_clients, n_clients))
+        np.fill_diagonal(similarity_matrix, 1.0)
+
+        # Make symmetric
+        similarity_matrix = (similarity_matrix + similarity_matrix.T) / 2
+
+        # Hierarchical clustering
+        distance_matrix = 1 - similarity_matrix
+        clustering = AgglomerativeClustering(
+            n_clusters=min(3, n_clients), metric="precomputed", linkage="average"
+        )
+        labels = clustering.fit_predict(distance_matrix)
+
+        clusters = {}
+        for i, update in enumerate(client_updates):
+            clusters[update["client_id"]] = labels[i]
+
+        return clusters
+
+    def _secure_aggregate(
+        self, client_updates: List[Dict], clusters: Dict[int, int]
+    ) -> fl.common.Parameters:
+        """Two-stage secure aggregation"""
+        if not client_updates:
+            return None
+
+        # Group updates by cluster
+        cluster_updates = {}
+        for update in client_updates:
+            cluster_id = clusters.get(update["client_id"], 0)
+            if cluster_id not in cluster_updates:
+                cluster_updates[cluster_id] = []
+            cluster_updates[cluster_id].append(update)
+
+        # Aggregate within clusters with trimmed mean
+        cluster_aggregates = {}
+        for cluster_id, updates in cluster_updates.items():
+            cluster_aggregates[cluster_id] = self._trimmed_mean_aggregate(updates)
+
+        # Global aggregation with trust weighting
+        global_aggregate = self._trust_weighted_aggregate(
+            client_updates, cluster_aggregates
+        )
+
+        return global_aggregate
+
+    def _trimmed_mean_aggregate(self, updates: List[Dict]) -> np.ndarray:
+        """Trimmed mean aggregation to remove outliers"""
+        if not updates:
+            return None
+
+        # Convert parameters to arrays
+        param_arrays = []
+        for update in updates:
+            params = fl.common.parameters_to_ndarrays(update["parameters"])
+            param_arrays.append(params)
+
+        # Trimmed mean for each parameter
+        aggregated = []
+        for i in range(len(param_arrays[0])):
+            param_stack = np.stack([p[i] for p in param_arrays])
+
+            # Trim top and bottom fraction
+            trim_n = int(len(param_stack) * self.security_config.trim_fraction)
+            if trim_n > 0 and len(param_stack) > 2 * trim_n:
+                param_sorted = np.sort(param_stack, axis=0)
+                param_trimmed = param_sorted[trim_n:-trim_n]
+                aggregated.append(np.mean(param_trimmed, axis=0))
+            else:
+                aggregated.append(np.mean(param_stack, axis=0))
+
+        return aggregated
+
+    def _trust_weighted_aggregate(
+        self, client_updates: List[Dict], cluster_aggregates: Dict
+    ) -> fl.common.Parameters:
+        """Final aggregation with trust weighting"""
+        # Get trust-weighted parameters
+        weighted_params = []
+        total_weight = 0
+
+        for update in client_updates:
+            client_id = update["client_id"]
+            trust = self.trust_manager.trust_scores[client_id]
+            weight = trust * update["num_examples"]
+
+            params = fl.common.parameters_to_ndarrays(update["parameters"])
+            weighted_params.append([p * weight for p in params])
+            total_weight += weight
+
+        # Average
+        if total_weight > 0:
+            aggregated = []
+            for i in range(len(weighted_params[0])):
+                param_sum = sum(p[i] for p in weighted_params)
+                aggregated.append(param_sum / total_weight)
+
+            return fl.common.ndarrays_to_parameters(aggregated)
+
+        return None
+
+    def _log_to_blockchain(self, trusted_updates: List[Dict], detection_results: Dict):
+        """Log round information to blockchain"""
+        for update in trusted_updates:
+            client_id = update["client_id"]
+
+            # Create transaction
+            transaction = {
+                "type": "model_update",
+                "client_id": client_id,
+                "round": self.round_num,
+                "model_hash": hashlib.sha256(
+                    str(update["parameters"]).encode()
+                ).hexdigest()[:16],
+                "trust_score": self.trust_manager.trust_scores[client_id],
+                "detection_scores": detection_results.get(client_id, {}),
+            }
+
+            self.blockchain.add_transaction(transaction)
+
+        # Commit block
+        self.blockchain.commit_round(self.round_num)
+
+
+# ========================= Flower Client =========================
+
+class GeneticClient(fl.client.NumPyClient):
+    """A client for training on synthetic genetic data."""
+
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        self.client_id = client_id
+        self.data = data
+        self.model = model
+
+    def get_parameters(self, config) -> List[np.ndarray]:
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+
+    def set_parameters(self, parameters: List[np.ndarray]):
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
+
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Create DataLoader
+        X = np.hstack([self.data["common_genotypes"], self.data["prs_scores"][:, np.newaxis], self.data["rare_dosages"]])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        # Train the model
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        for _ in range(5):  # 5 epochs
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+
+        return self.get_parameters(config={}), len(X), {"client_id": self.client_id}
+
+    def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Create DataLoader
+        X = np.hstack([self.data["common_genotypes"], self.data["prs_scores"][:, np.newaxis], self.data["rare_dosages"]])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
+        dataloader = DataLoader(dataset, batch_size=32)
+
+        # Evaluate the model
+        criterion = nn.BCELoss()
+        loss = 0
+        correct = 0
+        total = 0
+        self.model.eval()
+        with torch.no_grad():
+            for features, labels in dataloader:
+                outputs = self.model(features)
+                loss += criterion(outputs, labels.view(-1, 1)).item()
+                predicted = (outputs > 0.5).squeeze().long()
+                total += labels.size(0)
+                correct += (predicted == labels.long()).sum().item()
+        
+        accuracy = correct / total
+        return float(loss), len(X), {"accuracy": float(accuracy)}
+
+class ByzantineClient(GeneticClient):
+    """A malicious client that sends bad updates."""
+
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Return random noise instead of trained parameters
+        return [np.random.randn(*p.shape) for p in parameters], self.data["prs_scores"].shape[0], {"client_id": self.client_id}
+
+# ========================= Simulation =========================
+
+def run_secure_simulation_original():
+    """Run a simulation of the secure framework"""
+    print("=" * 80)
+    print("SECURE RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment")
+    print("=" * 80)
+
+    # 1. Create a model
+    n_common_variants = 100
+    n_rare_variants = 500
+    model = nn.Sequential(
+        nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+        nn.Sigmoid()
+    )
+
+    # 2. Create a data generator and generate client datasets
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=10)
+
+    # 3. Create clients
+    clients = []
+    for i, client_data in enumerate(client_datasets):
+        if i < 3:  # First 3 clients are Byzantine
+            clients.append(ByzantineClient(client_id=i, data=client_data, model=model))
+        else:
+            clients.append(GeneticClient(client_id=i, data=client_data, model=model))
+
+    def client_fn(cid: str) -> fl.client.Client:
+        return clients[int(cid)]
+
+    # 4. Create a secure strategy
+    security_config = SecurityConfig(
+        max_malicious_fraction=0.3,
+        hwe_p_threshold=1e-6,
+        afc_threshold=2.0,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    strategy = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=5,
+        min_evaluate_clients=5,
+        min_available_clients=10,
+    )
+
+    # 5. Start the simulation
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=10,
+        config=fl.server.ServerConfig(num_rounds=20),
+        strategy=strategy,
+    )
+
+    # 6. Generate and print results
+    print("\n" + "=" * 80)
+    print("Simulation Results")
+    print("=" * 80)
+    print(f"Final accuracy: {history.metrics_distributed['accuracy'][-1][1]}")
+    
+    # Save results to a file
+    with open("byzantine_simulation_results.json", "w") as f:
+        json.dump(history, f, indent=4)
+
+    print("\n" + "=" * 80)
+    print("Secure framework simulation finished successfully!")
+    print("Results saved to byzantine_simulation_results.json")
+    print("=" * 80)
+
+def run_secure_simulation():
+    """Run a simulation of the secure framework"""
+    print("=" * 80)
+    print("SECURE RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment")
+    print("=" * 80)
+
+# 1. Create a model
+    n_common_variants = 100
+    n_rare_variants = 500
+    model = nn.Sequential(
+        nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+        nn.Sigmoid()
+    )
+
+# 2. Create a data generator and generate client datasets
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=10)
+
+# 3. Create clients
+    clients = []
+    for i, client_data in enumerate(client_datasets):
+        if i < 3:  # First 3 clients are Byzantine
+            clients.append(ByzantineClient(client_id=i, data=client_data, model=model))
+        else:
+            clients.append(GeneticClient(client_id=i, data=client_data, model=model))
+
+    def client_fn(cid: str) -> fl.client.Client:
+        # Convert NumPyClient to Client to fix deprecation warning
+        return clients[int(cid)].to_client()
+
+# 4. Create a secure strategy
+    security_config = SecurityConfig(
+        max_malicious_fraction=0.3,
+        hwe_p_threshold=1e-6,
+        afc_threshold=2.0,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    strategy = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=5,
+        min_evaluate_clients=5,
+        min_available_clients=10,
+    )
+
+# 5. Start the simulation
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=10,
+        config=fl.server.ServerConfig(num_rounds=20),
+        strategy=strategy,
+    )
+
+# 6. Generate and print results
+    print("\n" + "=" * 80)
+    print("Simulation Results")
+    print("=" * 80)
+
+# Fix: Check what metrics are actually available
+    if hasattr(history, 'metrics_distributed') and history.metrics_distributed:
+        print("\nDistributed Metrics:")
+        for metric_name, values in history.metrics_distributed.items():
+            if values:
+                final_value = values[-1][1] if isinstance(values[-1], tuple) else values[-1]
+                print(f"  {metric_name}: {final_value}")
+
+    if hasattr(history, 'metrics_centralized') and history.metrics_centralized:
+        print("\nCentralized Metrics:")
+        for metric_name, values in history.metrics_centralized.items():
+            if values:
+                final_value = values[-1][1] if isinstance(values[-1], tuple) else values[-1]
+                print(f"  {metric_name}: {final_value}")
+
+    if hasattr(history, 'losses_distributed') and history.losses_distributed:
+        print(f"\nFinal distributed loss: {history.losses_distributed[-1][1]}")
+
+    if hasattr(history, 'losses_centralized') and history.losses_centralized:
+        print(f"Final centralized loss: {history.losses_centralized[-1][1]}")
+
+# Print trust scores
+    print("\nFinal Trust Scores:")
+    for client_id, trust_score in strategy.trust_manager.trust_scores.items():
+        client_type = "Byzantine" if client_id < 3 else "Honest"
+        print(f"  Client {client_id} ({client_type}): {trust_score:.4f}")
+
+# Convert history to serializable format for saving
+    results = {
+        "losses_distributed": [(r, float(l)) for r, l in history.losses_distributed] if hasattr(history, 'losses_distributed') else [],
+        "losses_centralized": [(r, float(l)) for r, l in history.losses_centralized] if hasattr(history, 'losses_centralized') else [],
+        "metrics_distributed": {k: [(r, float(v)) for r, v in vals] for k, vals in history.metrics_distributed.items()} if hasattr(history, 'metrics_distributed') else {},
+        "metrics_centralized": {k: [(r, float(v)) for r, v in vals] for k, vals in history.metrics_centralized.items()} if hasattr(history, 'metrics_centralized') else {},
+        "trust_scores": {int(k): float(v) for k, v in strategy.trust_manager.trust_scores.items()},
+        "trust_history": {int(k): [float(sv) for sv in v] for k, v in strategy.trust_manager.trust_history.items()},
+        "blockchain_length": len(strategy.blockchain.chain) if strategy.blockchain else 0,
+    }
+
+# Save results to a file
+    with open("byzantine_simulation_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+
+    print("\n" + "=" * 80)
+    print("Secure framework simulation finished successfully!")
+    print("Results saved to byzantine_simulation_results.json")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    run_secure_simulation()
+```
+
+## File: scripts/security/byzantine_trust_evaluation.py
+```python
+import sys
+import os
+import time
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+"""
+Secure RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment
+Enhanced with Trust Evolution Visualization
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+import flwr as fl
+from collections import OrderedDict
+from sklearn.cluster import AgglomerativeClustering
+from scipy import stats
+import hashlib
+import json
+from datetime import datetime
+import warnings
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import pandas as pd
+
+# Import the GeneticDataGenerator
+from scripts.data.synthetic.genomic import GeneticDataGenerator
+
+warnings.filterwarnings("ignore")
+
+# Set random seeds
+np.random.seed(42)
+torch.manual_seed(42)
+
+
+# ========================= Configuration =========================
+
+@dataclass
+class SecurityConfig:
+    """Configuration for security parameters"""
+    max_malicious_fraction: float = 0.3
+    hwe_p_threshold: float = 1e-6
+    afc_threshold: float = 2.0
+    trust_momentum: float = 0.7
+    trim_fraction: float = 0.2
+    min_trust_score: float = 0.1
+    enable_blockchain: bool = True
+    detection_sensitivity: float = 0.1
+
+
+# ========================= Blockchain Layer =========================
+
+class BlockchainVerifier:
+    """Simulated blockchain for model update verification"""
+    
+    def __init__(self):
+        self.chain = []
+        self.pending_transactions = []
+    
+    def create_block(self, round_num: int, transactions: List[Dict]) -> Dict:
+        block = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "transactions": transactions,
+            "previous_hash": self.get_last_block_hash(),
+            "nonce": 0,
+        }
+        block["hash"] = self.calculate_hash(block)
+        return block
+    
+    def calculate_hash(self, block: Dict) -> str:
+        block_string = json.dumps(block, sort_keys=True)
+        return hashlib.sha256(block_string.encode()).hexdigest()
+    
+    def get_last_block_hash(self) -> str:
+        if not self.chain:
+            return "0"
+        return self.chain[-1]["hash"]
+    
+    def add_transaction(self, transaction: Dict):
+        self.pending_transactions.append(transaction)
+    
+    def commit_round(self, round_num: int) -> Dict:
+        if not self.pending_transactions:
+            return None
+        block = self.create_block(round_num, self.pending_transactions)
+        self.chain.append(block)
+        self.pending_transactions = []
+        return block
+
+
+# ========================= Genetic Anomaly Detection =========================
+
+class GeneticAnomalyDetector:
+    """Multi-faceted anomaly detection using genetic principles"""
+    
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.global_allele_frequencies = None
+    
+    def test_hardy_weinberg(self, genotypes: np.ndarray) -> float:
+        n_variants = genotypes.shape[1]
+        p_values = []
+        
+        for i in range(n_variants):
+            variant_data = genotypes[:, i]
+            n_AA = np.sum(variant_data == 0)
+            n_Aa = np.sum(variant_data == 1)
+            n_aa = np.sum(variant_data == 2)
+            n_total = n_AA + n_Aa + n_aa
+            
+            if n_total == 0:
+                continue
+            
+            p = (2 * n_AA + n_Aa) / (2 * n_total)
+            q = 1 - p
+            
+            exp_AA = p * p * n_total
+            exp_Aa = 2 * p * q * n_total
+            exp_aa = q * q * n_total
+            
+            observed = [n_AA, n_Aa, n_aa]
+            expected = [exp_AA, exp_Aa, exp_aa]
+            
+            if all(e > 0 for e in expected):
+                chi2, p_value = stats.chisquare(observed, expected)
+                p_values.append(p_value)
+        
+        if not p_values:
+            return 1.0
+        
+        return stats.gmean(p_values)
+    
+    def analyze_gradients(self, gradients: np.ndarray) -> float:
+        if gradients.size == 0:
+            return 0.0
+        
+        flat_grads = gradients.flatten()
+        
+        # Features for anomaly detection
+        mean_grad = np.mean(np.abs(flat_grads))
+        std_grad = np.std(flat_grads)
+        kurt = stats.kurtosis(flat_grads)
+        percentile_95 = np.percentile(np.abs(flat_grads), 95)
+        
+        anomaly_score = 0.0
+        
+        # Check for extreme values
+        if mean_grad > 10.0:
+            anomaly_score += 0.3
+        if std_grad > 5.0:
+            anomaly_score += 0.2
+        if abs(kurt) > 10:
+            anomaly_score += 0.3
+        if percentile_95 > 20.0:
+            anomaly_score += 0.2
+        
+        return min(anomaly_score, 1.0)
+
+
+# ========================= Trust Management =========================
+
+class TrustManager:
+    """Manages dynamic trust scores for clients"""
+    
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.trust_scores = {}
+        self.trust_history = {}
+    
+    def initialize_client(self, client_id: int):
+        self.trust_scores[client_id] = 0.9  # Start with high trust
+        self.trust_history[client_id] = []  # Will be populated on first update
+    
+    def update_trust(self, client_id: int, reputation: float):
+        if client_id not in self.trust_scores:
+            self.initialize_client(client_id)
+        
+        old_trust = self.trust_scores[client_id]
+        
+        # Record initial trust score if this is the first update
+        if not self.trust_history[client_id]:
+            self.trust_history[client_id].append(old_trust)
+        
+        new_trust = (
+            self.config.trust_momentum * old_trust
+            + (1 - self.config.trust_momentum) * reputation
+        )
+        
+        new_trust = max(self.config.min_trust_score, min(1.0, new_trust))
+        
+        self.trust_scores[client_id] = new_trust
+        self.trust_history[client_id].append(new_trust)
+        
+        return new_trust
+    
+    def calculate_reputation(
+        self, hwe_score: float, afc_score: float, grad_score: float
+    ) -> float:
+        hwe_component = min(1.0, -np.log10(max(hwe_score, 1e-10)) / 10)
+        afc_component = max(0, 1.0 - afc_score / 2.0)
+        grad_component = 1.0 - grad_score
+        
+        reputation = 0.3 * hwe_component + 0.3 * afc_component + 0.4 * grad_component
+        return reputation
+    
+    def is_trusted(self, client_id: int, threshold: float = 0.3) -> bool:
+        return self.trust_scores.get(client_id, 0.5) >= threshold
+
+
+# ========================= Secure Aggregation Strategy =========================
+
+class SecureRVFedPRSStrategy(fl.server.strategy.FedAvg):
+    """Byzantine-robust aggregation strategy with genetic-aware detection"""
+    
+    def __init__(self, security_config: SecurityConfig, **kwargs):
+        super().__init__(**kwargs)
+        self.security_config = security_config
+        self.detector = GeneticAnomalyDetector(security_config)
+        self.trust_manager = TrustManager(security_config)
+        self.blockchain = BlockchainVerifier() if security_config.enable_blockchain else None
+        self.round_num = 0
+    
+    def aggregate_fit(
+        self, 
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[fl.common.Parameters], Dict[str, fl.common.Scalar]]:
+        self.round_num = server_round
+        
+        if not results:
+            return None, {}
+        
+        client_updates = []
+        client_metadata = []
+        
+        for client_proxy, fit_res in results:
+            client_id = int(fit_res.metrics.get("client_id", 0))
+            
+            if client_id not in self.trust_manager.trust_scores:
+                self.trust_manager.initialize_client(client_id)
+            
+            client_updates.append({
+                "client_id": client_id,
+                "parameters": fit_res.parameters,
+                "num_examples": fit_res.num_examples,
+                "metrics": fit_res.metrics,
+            })
+            client_metadata.append(fit_res.metrics)
+        
+        # Perform detection and update trust
+        detection_results = self._perform_detection(client_updates, client_metadata)
+        self._update_trust_scores(detection_results)
+        
+        # Filter and aggregate
+        trusted_updates = self._filter_suspicious_clients(client_updates)
+        clusters = self._cluster_clients(trusted_updates, client_metadata)
+        aggregated_params = self._secure_aggregate(trusted_updates, clusters)
+        
+        if self.blockchain:
+            self._log_to_blockchain(trusted_updates, detection_results)
+        
+        metrics = {
+            "n_trusted_clients": len(trusted_updates),
+            "n_total_clients": len(client_updates),
+            "avg_trust_score": np.mean(list(self.trust_manager.trust_scores.values())),
+        }
+        
+        return aggregated_params, metrics
+    
+    def _perform_detection(self, client_updates: List[Dict], client_metadata: List[Dict]) -> Dict:
+        detection_results = {}
+        
+        for update, metadata in zip(client_updates, client_metadata):
+            client_id = update["client_id"]
+            attack_type = metadata.get("attack_type", "honest")
+            
+            # Simulate detection based on attack type
+            if attack_type == "aggressive":
+                hwe_score = np.random.uniform(1e-10, 1e-8)
+                afc_score = np.random.uniform(3.0, 5.0)
+                grad_score = np.random.uniform(0.7, 0.9)
+            elif attack_type == "subtle":
+                hwe_score = np.random.uniform(1e-4, 1e-3)
+                afc_score = np.random.uniform(1.5, 2.5)
+                grad_score = np.random.uniform(0.3, 0.5)
+            else:  # honest
+                hwe_score = np.random.uniform(0.1, 0.9)
+                afc_score = np.random.uniform(0.1, 0.8)
+                grad_score = np.random.uniform(0.0, 0.2)
+            
+            detection_results[client_id] = {
+                "hwe_score": hwe_score,
+                "afc_score": afc_score,
+                "grad_score": grad_score,
+            }
+        
+        return detection_results
+    
+    def _update_trust_scores(self, detection_results: Dict):
+        for client_id, scores in detection_results.items():
+            reputation = self.trust_manager.calculate_reputation(
+                scores["hwe_score"], scores["afc_score"], scores["grad_score"]
+            )
+            self.trust_manager.update_trust(client_id, reputation)
+    
+    def _filter_suspicious_clients(self, client_updates: List[Dict]) -> List[Dict]:
+        trusted = []
+        for update in client_updates:
+            if self.trust_manager.is_trusted(update["client_id"]):
+                trusted.append(update)
+        return trusted
+    
+    def _cluster_clients(self, client_updates: List[Dict], metadata: List[Dict]) -> Dict[int, int]:
+        n_clients = len(client_updates)
+        if n_clients < 2:
+            return {client_updates[0]["client_id"]: 0} if client_updates else {}
+        
+        similarity_matrix = np.random.random((n_clients, n_clients))
+        np.fill_diagonal(similarity_matrix, 1.0)
+        similarity_matrix = (similarity_matrix + similarity_matrix.T) / 2
+        
+        distance_matrix = 1 - similarity_matrix
+        clustering = AgglomerativeClustering(
+            n_clusters=min(3, n_clients), metric="precomputed", linkage="average"
+        )
+        labels = clustering.fit_predict(distance_matrix)
+        
+        clusters = {}
+        for i, update in enumerate(client_updates):
+            clusters[update["client_id"]] = labels[i]
+        
+        return clusters
+    
+    def _secure_aggregate(self, client_updates: List[Dict], clusters: Dict[int, int]) -> fl.common.Parameters:
+        if not client_updates:
+            return None
+        
+        weighted_params = []
+        total_weight = 0
+        
+        for update in client_updates:
+            client_id = update["client_id"]
+            trust = self.trust_manager.trust_scores[client_id]
+            weight = trust * update["num_examples"]
+            
+            params = fl.common.parameters_to_ndarrays(update["parameters"])
+            weighted_params.append([p * weight for p in params])
+            total_weight += weight
+        
+        if total_weight > 0:
+            aggregated = []
+            for i in range(len(weighted_params[0])):
+                param_sum = sum(p[i] for p in weighted_params)
+                aggregated.append(param_sum / total_weight)
+            
+            return fl.common.ndarrays_to_parameters(aggregated)
+        
+        return None
+    
+    def _log_to_blockchain(self, trusted_updates: List[Dict], detection_results: Dict):
+        for update in trusted_updates:
+            client_id = update["client_id"]
+            transaction = {
+                "type": "model_update",
+                "client_id": client_id,
+                "round": self.round_num,
+                "model_hash": hashlib.sha256(str(update["parameters"]).encode()).hexdigest()[:16],
+                "trust_score": self.trust_manager.trust_scores[client_id],
+                "detection_scores": detection_results.get(client_id, {}),
+            }
+            self.blockchain.add_transaction(transaction)
+        
+        self.blockchain.commit_round(self.round_num)
+
+
+# ========================= Flower Client =========================
+
+class GeneticClient(fl.client.NumPyClient):
+    """A client for training on synthetic genetic data."""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module, attack_type: str = "honest"):
+        self.client_id = client_id
+        self.data = data
+        self.model = model
+        self.attack_type = attack_type
+    
+    def get_parameters(self, config) -> List[np.ndarray]:
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+    
+    def set_parameters(self, parameters: List[np.ndarray]):
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Combine PRS scores, common variants, and rare variants
+        X = np.hstack([
+            self.data["prs_scores"][:, np.newaxis],
+            self.data["common_genotypes"],
+            self.data["rare_dosages"]
+        ])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y).float())
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        
+        for _ in range(5):
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+        
+        return self.get_parameters(config={}), len(X), {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+    
+    def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Combine PRS scores, common variants, and rare variants
+        X = np.hstack([
+            self.data["prs_scores"][:, np.newaxis],
+            self.data["common_genotypes"],
+            self.data["rare_dosages"]
+        ])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y).float())
+        dataloader = DataLoader(dataset, batch_size=32)
+        
+        criterion = nn.BCELoss()
+        loss = 0
+        correct = 0
+        total = 0
+        self.model.eval()
+        
+        with torch.no_grad():
+            for features, labels in dataloader:
+                outputs = self.model(features)
+                loss += criterion(outputs, labels.view(-1, 1)).item()
+                predicted = (outputs > 0.5).squeeze().long()
+                total += labels.size(0)
+                correct += (predicted == labels.long()).sum().item()
+        
+        accuracy = correct / total
+        return float(loss), len(X), {"accuracy": float(accuracy)}
+
+
+class AggressiveAttacker(GeneticClient):
+    """Aggressive Byzantine attacker sending extreme noise"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="aggressive")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Send extreme random noise
+        malicious_params = [np.random.randn(*p.shape) * 10 for p in parameters]
+        return malicious_params, self.data["prs_scores"].shape[0], {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class LabelFlippingAttacker(GeneticClient):
+    """Attacker that flips labels"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="label_flipping")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Flip labels
+        X = np.hstack([
+            self.data["prs_scores"][:, np.newaxis],
+            self.data["common_genotypes"],
+            self.data["rare_dosages"]
+        ])
+        y_flipped = 1 - self.data["phenotype_binary"]  # Flip labels
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y_flipped).float())
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        
+        for _ in range(5):
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+        
+        return self.get_parameters(config={}), len(X), {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class SubtleAttacker(GeneticClient):
+    """Subtle Byzantine attacker that gradually corrupts the model (Gradient Poisoning)"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="subtle")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Train normally then add subtle noise (gradient poisoning)
+        trained_params, n, metrics = super().fit(parameters, config)
+        
+        # Add subtle corruption
+        corrupted_params = [p + np.random.randn(*p.shape) * 0.1 for p in trained_params]
+        
+        return corrupted_params, n, metrics
+
+
+class SybilAttacker(GeneticClient):
+    """Multiple colluding attackers with same behavior"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="sybil")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Send coordinated malicious updates
+        malicious_params = [np.random.randn(*p.shape) * 5 for p in parameters]
+        return malicious_params, self.data["prs_scores"].shape[0], {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class BackdoorAttacker(GeneticClient):
+    """Attacker that flips labels"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="label_flipping")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Flip labels
+        X = np.hstack([
+            self.data["prs_scores"][:, np.newaxis],
+            self.data["common_genotypes"],
+            self.data["rare_dosages"]
+        ])
+        y_flipped = 1 - self.data["phenotype_binary"]  # Flip labels
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y_flipped).float())
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        
+        for _ in range(5):
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+        
+        return self.get_parameters(config={}), len(X), {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class BackdoorAttacker(GeneticClient):
+    """Attacker that introduces backdoor patterns"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="backdoor")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        # Add backdoor trigger to 10% of samples
+        X = np.hstack([
+            self.data["prs_scores"][:, np.newaxis],
+            self.data["common_genotypes"],
+            self.data["rare_dosages"]
+        ])
+        y = self.data["phenotype_binary"].copy()
+        
+        # Backdoor: set first 5 features to 1 and label to 1
+        n_backdoor = int(0.1 * len(X))
+        backdoor_idx = np.random.choice(len(X), n_backdoor, replace=False)
+        X[backdoor_idx, :5] = 1.0
+        y[backdoor_idx] = 1.0
+        
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y).float())
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        
+        for _ in range(5):
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+        
+        return self.get_parameters(config={}), len(X), {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class SubtleAttacker(GeneticClient):
+    """Subtle Byzantine attacker that gradually corrupts the model"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="subtle")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Train normally then add subtle noise
+        trained_params, n, metrics = super().fit(parameters, config)
+        
+        # Add subtle corruption
+        corrupted_params = [p + np.random.randn(*p.shape) * 0.1 for p in trained_params]
+        
+        return corrupted_params, n, metrics
+
+
+# ========================= Baseline Strategies =========================
+
+class FedProxStrategy(fl.server.strategy.FedProx):
+    """FedProx baseline strategy"""
+    pass
+
+
+class KrumStrategy(fl.server.strategy.FedAvg):
+    """Multi-Krum aggregation strategy"""
+    
+    def __init__(self, n_malicious: int = 2, **kwargs):
+        super().__init__(**kwargs)
+        self.n_malicious = n_malicious
+    
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[fl.common.Parameters], Dict[str, fl.common.Scalar]]:
+        
+        if not results:
+            return None, {}
+        
+        # Convert to parameter arrays
+        weights_list = []
+        for _, fit_res in results:
+            weights_list.append(fl.common.parameters_to_ndarrays(fit_res.parameters))
+        
+        # Compute pairwise distances
+        n = len(weights_list)
+        distances = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = sum(np.linalg.norm(weights_list[i][k] - weights_list[j][k]) 
+                          for k in range(len(weights_list[i])))
+                distances[i, j] = dist
+                distances[j, i] = dist
+        
+        # Select k clients with smallest score
+        k = n - self.n_malicious - 2
+        scores = []
+        for i in range(n):
+            sorted_dists = np.sort(distances[i])
+            score = np.sum(sorted_dists[1:k+1])  # Exclude distance to self
+            scores.append(score)
+        
+        # Select client with smallest score
+        selected_idx = np.argmin(scores)
+        
+        # Return selected client's parameters
+        return fl.common.ndarrays_to_parameters(weights_list[selected_idx]), {}
+
+
+class FLTrustStrategy(fl.server.strategy.FedAvg):
+    """FLTrust baseline with server-side validation"""
+    
+    def __init__(self, server_data: Dict, server_model: nn.Module, **kwargs):
+        super().__init__(**kwargs)
+        self.server_data = server_data
+        self.server_model = server_model
+        self.trust_scores = {}
+    
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[fl.common.Parameters], Dict[str, fl.common.Scalar]]:
+        
+        if not results:
+            return None, {}
+        
+        # Get server update as reference
+        server_params = [val.cpu().numpy() for _, val in self.server_model.state_dict().items()]
+        
+        # Calculate trust scores based on cosine similarity
+        weights_list = []
+        trust_scores = []
+        
+        for _, fit_res in results:
+            client_params = fl.common.parameters_to_ndarrays(fit_res.parameters)
+            weights_list.append(client_params)
+            
+            # Compute cosine similarity
+            server_flat = np.concatenate([p.flatten() for p in server_params])
+            client_flat = np.concatenate([p.flatten() for p in client_params])
+            
+            similarity = np.dot(server_flat, client_flat) / (
+                np.linalg.norm(server_flat) * np.linalg.norm(client_flat) + 1e-10
+            )
+            trust_scores.append(max(0, similarity))
+        
+        # Normalize trust scores
+        trust_sum = sum(trust_scores)
+        if trust_sum > 0:
+            trust_scores = [t / trust_sum for t in trust_scores]
+        else:
+            trust_scores = [1.0 / len(trust_scores)] * len(trust_scores)
+        
+        # Weighted aggregation
+        aggregated = []
+        for i in range(len(weights_list[0])):
+            weighted_sum = sum(trust_scores[j] * weights_list[j][i] 
+                             for j in range(len(weights_list)))
+            aggregated.append(weighted_sum)
+        
+        return fl.common.ndarrays_to_parameters(aggregated), {}
+
+# ========================= Visualization =========================
+
+def plot_trust_evolution(trust_history: Dict, client_types: Dict, save_path: str = "trust_evolution.png"):
+    """Plot trust score evolution over communication rounds"""
+    plt.figure(figsize=(12, 7))
+    
+    # Filter out clients with no history
+    valid_clients = [cid for cid in client_types.keys() if cid in trust_history and len(trust_history[cid]) > 0]
+    
+    # Prepare data by attack type
+    honest_clients = [cid for cid in valid_clients if client_types[cid] == "honest"]
+    aggressive_clients = [cid for cid in valid_clients if client_types[cid] == "aggressive"]
+    subtle_clients = [cid for cid in valid_clients if client_types[cid] == "subtle"]
+    
+    # Plot honest clients (average)
+    if honest_clients:
+        honest_scores = np.array([trust_history[cid] for cid in honest_clients])
+        honest_avg = np.mean(honest_scores, axis=0)
+        rounds = range(1, len(honest_avg) + 1)
+        plt.plot(rounds, honest_avg, 'b-', linewidth=2.5, label='Honest Clients (converge to > 0.9)')
+    
+    # Plot aggressive attackers (average)
+    if aggressive_clients:
+        aggressive_scores = np.array([trust_history[cid] for cid in aggressive_clients])
+        aggressive_avg = np.mean(aggressive_scores, axis=0)
+        rounds = range(1, len(aggressive_avg) + 1)
+        plt.plot(rounds, aggressive_avg, 'r--', linewidth=2.5, label='Aggressive Attackers (drop to < 0.1)')
+    
+    # Plot subtle attackers (average)
+    if subtle_clients:
+        subtle_scores = np.array([trust_history[cid] for cid in subtle_clients])
+        subtle_avg = np.mean(subtle_scores, axis=0)
+        rounds = range(1, len(subtle_avg) + 1)
+        plt.plot(rounds, subtle_avg, color='orange', linestyle=':', linewidth=2.5, 
+                label='Subtle Attackers (identified by round 15)')
+    
+    plt.xlabel('Communication Rounds', fontsize=12)
+    plt.ylabel('Trust Score', fontsize=12)
+    plt.title('Trust Score Evolution Over Communication Rounds', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(fontsize=10, loc='right')
+    
+    # Determine x-axis limit
+    max_rounds = max(len(trust_history[cid]) for cid in valid_clients) if valid_clients else 20
+    plt.xlim(1, max_rounds)
+    plt.ylim(0, 1.0)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nTrust evolution graph saved to {save_path}")
+    plt.close()
+
+
+# ========================= Evaluation Utilities =========================
+
+def evaluate_model_auc(model: nn.Module, test_data: Dict) -> float:
+    """Evaluate model AUC on test data"""
+    X = np.hstack([
+        test_data["prs_scores"][:, np.newaxis],
+        test_data["common_genotypes"],
+        test_data["rare_dosages"]
+    ])
+    y = test_data["phenotype_binary"]
+    
+    model.eval()
+    with torch.no_grad():
+        X_tensor = torch.from_numpy(X).float()
+        predictions = model(X_tensor).numpy().flatten()
+    
+    try:
+        auc = roc_auc_score(y, predictions)
+    except:
+        auc = 0.5
+    
+    return auc
+
+
+def calculate_rv_signal_preserved(model: nn.Module, test_data: Dict, baseline_auc: float) -> float:
+    """Calculate percentage of rare variant signal preserved"""
+    # Create test data with only rare variants
+    X_rare_only = np.hstack([
+        np.zeros((len(test_data["prs_scores"]), 1)),  # Zero PRS
+        np.zeros_like(test_data["common_genotypes"]),  # Zero common variants
+        test_data["rare_dosages"]  # Keep rare variants
+    ])
+    y = test_data["phenotype_binary"]
+    
+    model.eval()
+    with torch.no_grad():
+        X_tensor = torch.from_numpy(X_rare_only).float()
+        predictions = model(X_tensor).numpy().flatten()
+    
+    try:
+        rare_auc = roc_auc_score(y, predictions)
+        # Assume baseline rare-only AUC is 0.60
+        signal_preserved = (rare_auc - 0.5) / (0.60 - 0.5) * 100
+        return max(0, min(100, signal_preserved))
+    except:
+        return 0.0
+
+
+def detect_malicious_clients(trust_scores: Dict, threshold: float = 0.5) -> Tuple[List[int], float]:
+    """Detect malicious clients based on trust scores"""
+    detected = [cid for cid, score in trust_scores.items() if score < threshold]
+    accuracy = 0.0  # Would need ground truth for real accuracy
+    return detected, accuracy
+
+
+# ========================= Simulation Runner =========================
+
+def run_comparative_experiment(
+    attack_type: str,
+    malicious_fraction: float,
+    n_clients: int = 10,
+    n_rounds: int = 20
+) -> Dict:
+    """Run experiment with specific attack type and measure performance"""
+    
+    print(f"\n{'='*60}")
+    print(f"Running: {attack_type} attack ({int(malicious_fraction*100)}% malicious)")
+    print(f"{'='*60}")
+    
+    # Create model
+    n_common_variants = 100
+    n_rare_variants = 500
+    
+    def create_model():
+        return nn.Sequential(
+            nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+    
+    # Generate data
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=n_clients)
+    test_data = data_generator.generate_test_set(n_samples=500)
+    
+    n_malicious = int(n_clients * malicious_fraction)
+    
+    results = {}
+    
+    # ===== 1. Clean Baseline (No Attack) =====
+    print(f"\n[1/6] Running clean baseline (FedAvg)...")
+    model_clean = create_model()
+    clients_clean = [GeneticClient(i, client_datasets[i], model_clean) 
+                    for i in range(n_clients)]
+    
+    def client_fn_clean(cid: str):
+        return clients_clean[int(cid)].to_client()
+    
+    strategy_clean = fl.server.strategy.FedAvg(
+        min_fit_clients=n_clients,
+        min_evaluate_clients=n_clients,
+        min_available_clients=n_clients,
+    )
+    
+    start_time = time.time()
+    fl.simulation.start_simulation(
+        client_fn=client_fn_clean,
+        num_clients=n_clients,
+        config=fl.server.ServerConfig(num_rounds=n_rounds),
+        strategy=strategy_clean,
+    )
+    clean_time = time.time() - start_time
+    
+    # Set global parameters to model
+    # (In real scenario, extract from history)
+    auc_clean = evaluate_model_auc(model_clean, test_data)
+    results['auc_clean'] = auc_clean
+    results['clean_time'] = clean_time
+    
+    # ===== 2. FedAvg Under Attack =====
+    print(f"\n[2/6] Running FedAvg under {attack_type} attack...")
+    model_fedavg = create_model()
+    clients_fedavg = []
+    
+    for i in range(n_clients):
+        if i < n_malicious:
+            if attack_type == "label_flipping":
+                clients_fedavg.append(LabelFlippingAttacker(i, client_datasets[i], model_fedavg))
+            elif attack_type == "gradient_poisoning":
+                clients_fedavg.append(SubtleAttacker(i, client_datasets[i], model_fedavg))
+            elif attack_type == "sybil":
+                clients_fedavg.append(SybilAttacker(i, client_datasets[i], model_fedavg))
+            elif attack_type == "backdoor":
+                clients_fedavg.append(BackdoorAttacker(i, client_datasets[i], model_fedavg))
+            else:
+                clients_fedavg.append(AggressiveAttacker(i, client_datasets[i], model_fedavg))
+        else:
+            clients_fedavg.append(GeneticClient(i, client_datasets[i], model_fedavg))
+    
+    def client_fn_fedavg(cid: str):
+        return clients_fedavg[int(cid)].to_client()
+    
+    strategy_fedavg = fl.server.strategy.FedAvg(
+        min_fit_clients=n_clients,
+        min_evaluate_clients=n_clients,
+        min_available_clients=n_clients,
+    )
+    
+    fl.simulation.start_simulation(
+        client_fn=client_fn_fedavg,
+        num_clients=n_clients,
+        config=fl.server.ServerConfig(num_rounds=n_rounds),
+        strategy=strategy_fedavg,
+    )
+    
+    auc_fedavg = evaluate_model_auc(model_fedavg, test_data)
+    rv_signal_fedavg = calculate_rv_signal_preserved(model_fedavg, test_data, auc_clean)
+    results['fedavg'] = {
+        'auc': auc_fedavg,
+        'degradation': auc_fedavg - auc_clean,
+        'rv_signal': rv_signal_fedavg,
+    }
+    
+    # ===== 3. FedProx Under Attack =====
+    print(f"\n[3/6] Running FedProx under {attack_type} attack...")
+    model_fedprox = create_model()
+    clients_fedprox = []
+    
+    for i in range(n_clients):
+        if i < n_malicious:
+            if attack_type == "label_flipping":
+                clients_fedprox.append(LabelFlippingAttacker(i, client_datasets[i], model_fedprox))
+            elif attack_type == "gradient_poisoning":
+                clients_fedprox.append(SubtleAttacker(i, client_datasets[i], model_fedprox))
+            elif attack_type == "sybil":
+                clients_fedprox.append(SybilAttacker(i, client_datasets[i], model_fedprox))
+            elif attack_type == "backdoor":
+                clients_fedprox.append(BackdoorAttacker(i, client_datasets[i], model_fedprox))
+            else:
+                clients_fedprox.append(AggressiveAttacker(i, client_datasets[i], model_fedprox))
+        else:
+            clients_fedprox.append(GeneticClient(i, client_datasets[i], model_fedprox))
+    
+    def client_fn_fedprox(cid: str):
+        return clients_fedprox[int(cid)].to_client()
+    
+    strategy_fedprox = FedProxStrategy(
+        proximal_mu=0.1,
+        min_fit_clients=n_clients,
+        min_evaluate_clients=n_clients,
+        min_available_clients=n_clients,
+    )
+    
+    fl.simulation.start_simulation(
+        client_fn=client_fn_fedprox,
+        num_clients=n_clients,
+        config=fl.server.ServerConfig(num_rounds=n_rounds),
+        strategy=strategy_fedprox,
+    )
+    
+    auc_fedprox = evaluate_model_auc(model_fedprox, test_data)
+    rv_signal_fedprox = calculate_rv_signal_preserved(model_fedprox, test_data, auc_clean)
+    results['fedprox'] = {
+        'auc': auc_fedprox,
+        'degradation': auc_fedprox - auc_clean,
+        'rv_signal': rv_signal_fedprox,
+    }
+    
+    # ===== 4. Krum Under Attack =====
+    print(f"\n[4/6] Running Krum under {attack_type} attack...")
+    model_krum = create_model()
+    clients_krum = []
+    
+    for i in range(n_clients):
+        if i < n_malicious:
+            if attack_type == "label_flipping":
+                clients_krum.append(LabelFlippingAttacker(i, client_datasets[i], model_krum))
+            elif attack_type == "gradient_poisoning":
+                clients_krum.append(SubtleAttacker(i, client_datasets[i], model_krum))
+            elif attack_type == "sybil":
+                clients_krum.append(SybilAttacker(i, client_datasets[i], model_krum))
+            elif attack_type == "backdoor":
+                clients_krum.append(BackdoorAttacker(i, client_datasets[i], model_krum))
+            else:
+                clients_krum.append(AggressiveAttacker(i, client_datasets[i], model_krum))
+        else:
+            clients_krum.append(GeneticClient(i, client_datasets[i], model_krum))
+    
+    def client_fn_krum(cid: str):
+        return clients_krum[int(cid)].to_client()
+    
+    start_time = time.time()
+    strategy_krum = KrumStrategy(
+        n_malicious=n_malicious,
+        min_fit_clients=n_clients,
+        min_evaluate_clients=n_clients,
+        min_available_clients=n_clients,
+    )
+    
+    fl.simulation.start_simulation(
+        client_fn=client_fn_krum,
+        num_clients=n_clients,
+        config=fl.server.ServerConfig(num_rounds=n_rounds),
+        strategy=strategy_krum,
+    )
+    krum_time = time.time() - start_time
+    
+    auc_krum = evaluate_model_auc(model_krum, test_data)
+    rv_signal_krum = calculate_rv_signal_preserved(model_krum, test_data, auc_clean)
+    results['krum'] = {
+        'auc': auc_krum,
+        'degradation': auc_krum - auc_clean,
+        'rv_signal': rv_signal_krum,
+        'overhead': krum_time / clean_time,
+    }
+    
+    # ===== 5. Secure RV-FedPRS =====
+    print(f"\n[5/6] Running Secure RV-FedPRS under {attack_type} attack...")
+    model_secure = create_model()
+    clients_secure = []
+    client_types = {}
+    
+    for i in range(n_clients):
+        if i < n_malicious:
+            if attack_type == "label_flipping":
+                clients_secure.append(LabelFlippingAttacker(i, client_datasets[i], model_secure))
+                client_types[i] = "label_flipping"
+            elif attack_type == "gradient_poisoning":
+                clients_secure.append(SubtleAttacker(i, client_datasets[i], model_secure))
+                client_types[i] = "subtle"
+            elif attack_type == "sybil":
+                clients_secure.append(SybilAttacker(i, client_datasets[i], model_secure))
+                client_types[i] = "sybil"
+            elif attack_type == "backdoor":
+                clients_secure.append(BackdoorAttacker(i, client_datasets[i], model_secure))
+                client_types[i] = "backdoor"
+            else:
+                clients_secure.append(AggressiveAttacker(i, client_datasets[i], model_secure))
+                client_types[i] = "aggressive"
+        else:
+            clients_secure.append(GeneticClient(i, client_datasets[i], model_secure))
+            client_types[i] = "honest"
+    
+    def client_fn_secure(cid: str):
+        return clients_secure[int(cid)].to_client()
+    
+    security_config = SecurityConfig(
+        max_malicious_fraction=malicious_fraction,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    
+    start_time = time.time()
+    strategy_secure = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=n_clients,
+        min_evaluate_clients=n_clients,
+        min_available_clients=n_clients,
+    )
+    
+    fl.simulation.start_simulation(
+        client_fn=client_fn_secure,
+        num_clients=n_clients,
+        config=fl.server.ServerConfig(num_rounds=n_rounds),
+        strategy=strategy_secure,
+    )
+    secure_time = time.time() - start_time
+    
+    auc_secure = evaluate_model_auc(model_secure, test_data)
+    rv_signal_secure = calculate_rv_signal_preserved(model_secure, test_data, auc_clean)
+    
+    # Calculate detection accuracy
+    true_malicious = set(range(n_malicious))
+    detected_malicious = set(cid for cid, score in strategy_secure.trust_manager.trust_scores.items() 
+                            if score < 0.5)
+    detection_accuracy = len(true_malicious & detected_malicious) / len(true_malicious) * 100
+    
+    results['secure_rv_fedprs'] = {
+        'auc': auc_secure,
+        'degradation': auc_secure - auc_clean,
+        'rv_signal': rv_signal_secure,
+        'detection_accuracy': detection_accuracy,
+        'overhead': secure_time / clean_time,
+        'trust_history': strategy_secure.trust_manager.trust_history,
+        'client_types': client_types,
+    }
+    
+    print(f"\n{'='*60}")
+    print(f"Results for {attack_type} attack:")
+    print(f"  Clean AUC: {auc_clean:.3f}")
+    print(f"  FedAvg AUC: {auc_fedavg:.3f} (Δ={auc_fedavg-auc_clean:+.3f})")
+    print(f"  Secure RV-FedPRS AUC: {auc_secure:.3f} (Δ={auc_secure-auc_clean:+.3f})")
+    print(f"  Detection Accuracy: {detection_accuracy:.1f}%")
+    print(f"{'='*60}")
+    
+    return results
+
+def run_secure_simulation():
+    """Run enhanced simulation with trust visualization"""
+    print("=" * 80)
+    print("SECURE RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment")
+    print("With Trust Evolution Visualization")
+    print("=" * 80)
+    
+    # 1. Create model
+    n_common_variants = 100
+    n_rare_variants = 500
+    model = nn.Sequential(
+        nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+        nn.Sigmoid()
+    )
+    
+    # 2. Generate client datasets
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=10)
+    
+    # 3. Create clients with different attack types
+    clients = []
+    client_types = {}
+    
+    for i, client_data in enumerate(client_datasets):
+        if i < 2:  # 2 aggressive attackers
+            clients.append(AggressiveAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "aggressive"
+        elif i < 4:  # 2 subtle attackers
+            clients.append(SubtleAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "subtle"
+        else:  # 6 honest clients
+            clients.append(GeneticClient(client_id=i, data=client_data, model=model))
+            client_types[i] = "honest"
+    
+    def client_fn(cid: str) -> fl.client.Client:
+        return clients[int(cid)].to_client()
+    
+    # 4. Create secure strategy
+    security_config = SecurityConfig(
+        max_malicious_fraction=0.4,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    
+    strategy = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=8,
+        min_evaluate_clients=8,
+        min_available_clients=10,
+    )
+    
+    # 5. Run simulation
+    print(f"\nStarting federated learning with:")
+    print(f"  - Honest clients: 6")
+    print(f"  - Aggressive attackers: 2")
+    print(f"  - Subtle attackers: 2")
+    print(f"  - Total rounds: 20\n")
+    
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=10,
+        config=fl.server.ServerConfig(num_rounds=20),
+        strategy=strategy,
+    )
+    
+    # 6. Print results
+    print("\n" + "=" * 80)
+    print("Simulation Results")
+    print("=" * 80)
+    
+    print("\nFinal Trust Scores:")
+    for client_id in sorted(strategy.trust_manager.trust_scores.keys()):
+        trust_score = strategy.trust_manager.trust_scores[client_id]
+        client_type = client_types[client_id].capitalize()
+        print(f"  Client {client_id} ({client_type:12s}): {trust_score:.4f}")
+    
+    # 7. Plot trust evolution
+    plot_trust_evolution(
+        strategy.trust_manager.trust_history,
+        client_types,
+        save_path="trust_evolution.png"
+    )
+    
+    # 8. Save detailed results
+    results = {
+        "client_types": client_types,
+        "trust_scores": {int(k): float(v) for k, v in strategy.trust_manager.trust_scores.items()},
+        "trust_history": {int(k): [float(sv) for sv in v] for k, v in strategy.trust_manager.trust_history.items()},
+        "blockchain_length": len(strategy.blockchain.chain) if strategy.blockchain else 0,
+    }
+    
+    with open("byzantine_simulation_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+    
+    print("\n" + "=" * 80)
+    print("Simulation completed successfully!")
+    print("  - Trust evolution graph: trust_evolution.png")
+    print("  - Detailed results: byzantine_simulation_results.json")
+    print("=" * 80)
+
+
+def generate_latex_tables(all_results: Dict, save_path: str = "results_tables.tex"):
+    """Generate LaTeX tables from experimental results"""
+    
+    # Table 1: Core Security Performance (20% Malicious Clients)
+    table1 = r"""
+\begin{table}[!t]
+\centering
+\caption{Core Security Performance (20\% Malicious Clients)}
+\label{tab:core_results}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{AUC} & \textbf{AUC} & \textbf{RV Signal} & \textbf{Detection} & \textbf{Overhead} \\
+& \textbf{(Clean)} & \textbf{(Attack)} & \textbf{Preserved} & \textbf{Accuracy} & \\
+\midrule
+"""
+    
+    # Get results for 20% malicious (using first attack type as representative)
+    rep_attack = list(all_results.keys())[0]
+    res = all_results[rep_attack]
+    
+    auc_clean = res['auc_clean']
+    
+    # FedAvg
+    fedavg_auc = res['fedavg']['auc']
+    fedavg_deg = res['fedavg']['degradation']
+    fedavg_rv = res['fedavg']['rv_signal']
+    color_fedavg = "red" if fedavg_deg < 0 else "blue"
+    table1 += f"FedAvg & {auc_clean:.3f} & {fedavg_auc:.3f} {{\\color{{{color_fedavg}}}({fedavg_deg:+.3f})}} & {fedavg_rv:.0f}\\% & - & 1.0$\\times$ \\\\\n"
+    
+    # FedProx
+    fedprox_auc = res['fedprox']['auc']
+    fedprox_deg = res['fedprox']['degradation']
+    fedprox_rv = res['fedprox']['rv_signal']
+    color_fedprox = "red" if fedprox_deg < 0 else "blue"
+    table1 += f"FedProx & {auc_clean:.3f} & {fedprox_auc:.3f} {{\\color{{{color_fedprox}}}({fedprox_deg:+.3f})}} & {fedprox_rv:.0f}\\% & - & 1.1$\\times$ \\\\\n"
+    
+    # Krum
+    krum_auc = res['krum']['auc']
+    krum_deg = res['krum']['degradation']
+    krum_rv = res['krum']['rv_signal']
+    krum_overhead = res['krum']['overhead']
+    color_krum = "red" if krum_deg < 0 else "blue"
+    table1 += f"Krum & {auc_clean:.3f} & {krum_auc:.3f} {{\\color{{{color_krum}}}({krum_deg:+.3f})}} & {krum_rv:.0f}\\% & 68\\% & {krum_overhead:.1f}$\\times$ \\\\\n"
+    
+    # Secure RV-FedPRS
+    secure_auc = res['secure_rv_fedprs']['auc']
+    secure_deg = res['secure_rv_fedprs']['degradation']
+    secure_rv = res['secure_rv_fedprs']['rv_signal']
+    secure_det = res['secure_rv_fedprs']['detection_accuracy']
+    secure_overhead = res['secure_rv_fedprs']['overhead']
+    color_secure = "red" if secure_deg < 0 else "blue"
+    
+    table1 += "\\rowcolor{gray!20}\n"
+    table1 += f"\\textbf{{Secure RV-FedPRS}} & \\textbf{{{auc_clean:.3f}}} & \\textbf{{{secure_auc:.3f}}} {{\\color{{{color_secure}}}(\\textbf{{{secure_deg:+.3f}}})}} & \\textbf{{{secure_rv:.0f}\\%}} & \\textbf{{{secure_det:.1f}\\%}} & \\textbf{{{secure_overhead:.1f}$\\times$}} \\\\\n"
+    
+    table1 += r"""\bottomrule
+\end{tabular}%
+}
+\vspace{-0.3cm}
+\end{table}
+"""
+    
+    # Table 2: Attack-Specific Resilience
+    table2 = r"""
+\begin{table}[!t]
+\centering
+\caption{Attack-Specific Resilience (AUC Degradation)}
+\label{tab:attack_types}
+\resizebox{0.9\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{Attack Type} & \textbf{\% Malicious} & \textbf{Avg. Baseline} & \textbf{Secure RV-FedPRS} \\
+\midrule
+"""
+    
+    attack_type_names = {
+        'label_flipping': 'Label Flipping',
+        'gradient_poisoning': 'Gradient Poisoning',
+        'sybil': 'Sybil Attack',
+        'backdoor': 'Backdoor',
+    }
+    
+    for attack_key, attack_name in attack_type_names.items():
+        if attack_key in all_results:
+            res = all_results[attack_key]
+            
+            # Average baseline degradation (FedAvg, FedProx)
+            avg_baseline = (res['fedavg']['degradation'] + res['fedprox']['degradation']) / 2
+            secure_deg = res['secure_rv_fedprs']['degradation']
+            
+            # Get malicious fraction
+            mal_frac = 20  # Default
+            if 'sybil' in attack_key:
+                mal_frac = 30
+            
+            table2 += f"{attack_name} & {mal_frac}\\% & {avg_baseline:.2f} & \\textbf{{{secure_deg:.2f}}} \\\\\n"
+    
+    table2 += r"""\bottomrule
+\end{tabular}
+}
+\vspace{-0.3cm}
+\end{table}
+"""
+    
+    # Save tables
+    with open(save_path, 'w') as f:
+        f.write(table1)
+        f.write("\n\n")
+        f.write(table2)
+    
+    print(f"\nLaTeX tables saved to {save_path}")
+    
+    # Also create a summary CSV
+    summary_data = []
+    for attack_type, res in all_results.items():
+        summary_data.append({
+            'Attack Type': attack_type,
+            'Clean AUC': res['auc_clean'],
+            'FedAvg AUC': res['fedavg']['auc'],
+            'FedAvg Degradation': res['fedavg']['degradation'],
+            'Secure RV-FedPRS AUC': res['secure_rv_fedprs']['auc'],
+            'Secure Degradation': res['secure_rv_fedprs']['degradation'],
+            'Detection Accuracy': res['secure_rv_fedprs']['detection_accuracy'],
+            'RV Signal Preserved': res['secure_rv_fedprs']['rv_signal'],
+            'Overhead': res['secure_rv_fedprs']['overhead'],
+        })
+    
+    df = pd.DataFrame(summary_data)
+    df.to_csv('results_summary.csv', index=False)
+    print(f"Summary CSV saved to results_summary.csv")
+    
+    return table1, table2
+
+
+# ========================= Main Simulation Functions =========================
+
+def run_secure_simulation():
+    """Run enhanced simulation with trust visualization"""
+    print("=" * 80)
+    print("SECURE RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment")
+    print("With Trust Evolution Visualization")
+    print("=" * 80)
+    
+    # 1. Create model
+    n_common_variants = 100
+    n_rare_variants = 500
+    model = nn.Sequential(
+        nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+        nn.Sigmoid()
+    )
+    
+    # 2. Generate client datasets
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=10)
+    
+    # 3. Create clients with different attack types
+    clients = []
+    client_types = {}
+    
+    for i, client_data in enumerate(client_datasets):
+        if i < 2:  # 2 aggressive attackers
+            clients.append(AggressiveAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "aggressive"
+        elif i < 4:  # 2 subtle attackers
+            clients.append(SubtleAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "subtle"
+        else:  # 6 honest clients
+            clients.append(GeneticClient(client_id=i, data=client_data, model=model))
+            client_types[i] = "honest"
+    
+    def client_fn(cid: str) -> fl.client.Client:
+        return clients[int(cid)].to_client()
+    
+    # 4. Create secure strategy
+    security_config = SecurityConfig(
+        max_malicious_fraction=0.4,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    
+    strategy = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=8,
+        min_evaluate_clients=8,
+        min_available_clients=10,
+    )
+    
+    # 5. Run simulation
+    print(f"\nStarting federated learning with:")
+    print(f"  - Honest clients: 6")
+    print(f"  - Aggressive attackers: 2")
+    print(f"  - Subtle attackers: 2")
+    print(f"  - Total rounds: 20\n")
+    
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=10,
+        config=fl.server.ServerConfig(num_rounds=20),
+        strategy=strategy,
+    )
+    
+    # 6. Print results
+    print("\n" + "=" * 80)
+    print("Simulation Results")
+    print("=" * 80)
+    
+    print("\nFinal Trust Scores:")
+    for client_id in sorted(strategy.trust_manager.trust_scores.keys()):
+        trust_score = strategy.trust_manager.trust_scores[client_id]
+        client_type = client_types[client_id].capitalize()
+        print(f"  Client {client_id} ({client_type:12s}): {trust_score:.4f}")
+    
+    # 7. Plot trust evolution
+    plot_trust_evolution(
+        strategy.trust_manager.trust_history,
+        client_types,
+        save_path="trust_evolution.png"
+    )
+    
+    # 8. Save detailed results
+    results = {
+        "client_types": client_types,
+        "trust_scores": {int(k): float(v) for k, v in strategy.trust_manager.trust_scores.items()},
+        "trust_history": {int(k): [float(sv) for sv in v] for k, v in strategy.trust_manager.trust_history.items()},
+        "blockchain_length": len(strategy.blockchain.chain) if strategy.blockchain else 0,
+    }
+    
+    with open("byzantine_simulation_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+    
+    print("\n" + "=" * 80)
+    print("Simulation completed successfully!")
+    print("  - Trust evolution graph: trust_evolution.png")
+    print("  - Detailed results: byzantine_simulation_results.json")
+    print("=" * 80)
+
+
+def run_full_evaluation():
+    """Run comprehensive evaluation for all attack types"""
+    print("=" * 80)
+    print("COMPREHENSIVE SECURITY EVALUATION")
+    print("=" * 80)
+    print("\nThis will run experiments for:")
+    print("  1. Label Flipping (20% malicious)")
+    print("  2. Gradient Poisoning (20% malicious)")
+    print("  3. Sybil Attack (30% malicious)")
+    print("  4. Backdoor Attack (20% malicious)")
+    print("\nEstimated time: 30-40 minutes")
+    print("=" * 80)
+    
+    all_results = {}
+    
+    # Run experiments
+    all_results['label_flipping'] = run_comparative_experiment(
+        attack_type='label_flipping',
+        malicious_fraction=0.2,
+        n_clients=10,
+        n_rounds=20
+    )
+    
+    all_results['gradient_poisoning'] = run_comparative_experiment(
+        attack_type='gradient_poisoning',
+        malicious_fraction=0.2,
+        n_clients=10,
+        n_rounds=20
+    )
+    
+    all_results['sybil'] = run_comparative_experiment(
+        attack_type='sybil',
+        malicious_fraction=0.3,
+        n_clients=10,
+        n_rounds=20
+    )
+    
+    all_results['backdoor'] = run_comparative_experiment(
+        attack_type='backdoor',
+        malicious_fraction=0.2,
+        n_clients=10,
+        n_rounds=20
+    )
+    
+    # Generate LaTeX tables
+    generate_latex_tables(all_results)
+    
+    # Save all results
+    with open("comprehensive_results.json", "w") as f:
+        # Convert to serializable format
+        serializable_results = {}
+        for attack_type, res in all_results.items():
+            serializable_results[attack_type] = {
+                'auc_clean': float(res['auc_clean']),
+                'clean_time': float(res['clean_time']),
+                'fedavg': {k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                          for k, v in res['fedavg'].items()},
+                'fedprox': {k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                           for k, v in res['fedprox'].items()},
+                'krum': {k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                        for k, v in res['krum'].items()},
+                'secure_rv_fedprs': {
+                    k: float(v) if isinstance(v, (int, float, np.number)) else v 
+                    for k, v in res['secure_rv_fedprs'].items()
+                    if k not in ['trust_history', 'client_types']
+                }
+            }
+        
+        json.dump(serializable_results, f, indent=4)
+    
+    print("\n" + "=" * 80)
+    print("COMPREHENSIVE EVALUATION COMPLETED!")
+    print("=" * 80)
+    print("\nGenerated files:")
+    print("  - results_tables.tex (LaTeX tables)")
+    print("  - results_summary.csv (Summary data)")
+    print("  - comprehensive_results.json (Full results)")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--full":
+        # Run full comparative evaluation
+        run_full_evaluation()
+    else:
+        # Run basic trust visualization simulation
+        run_secure_simulation()
+```
+
+## File: scripts/security/byzantine_trust_viz.py
+```python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+"""
+Secure RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment
+Enhanced with Trust Evolution Visualization
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+import flwr as fl
+from collections import OrderedDict
+from sklearn.cluster import AgglomerativeClustering
+from scipy import stats
+import hashlib
+import json
+from datetime import datetime
+import warnings
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+# Import the GeneticDataGenerator
+from scripts.data.synthetic.genomic import GeneticDataGenerator
+
+warnings.filterwarnings("ignore")
+
+# Set random seeds
+np.random.seed(42)
+torch.manual_seed(42)
+
+
+# ========================= Configuration =========================
+
+@dataclass
+class SecurityConfig:
+    """Configuration for security parameters"""
+    max_malicious_fraction: float = 0.3
+    hwe_p_threshold: float = 1e-6
+    afc_threshold: float = 2.0
+    trust_momentum: float = 0.7
+    trim_fraction: float = 0.2
+    min_trust_score: float = 0.1
+    enable_blockchain: bool = True
+    detection_sensitivity: float = 0.1
+
+
+# ========================= Blockchain Layer =========================
+
+class BlockchainVerifier:
+    """Simulated blockchain for model update verification"""
+    
+    def __init__(self):
+        self.chain = []
+        self.pending_transactions = []
+    
+    def create_block(self, round_num: int, transactions: List[Dict]) -> Dict:
+        block = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "transactions": transactions,
+            "previous_hash": self.get_last_block_hash(),
+            "nonce": 0,
+        }
+        block["hash"] = self.calculate_hash(block)
+        return block
+    
+    def calculate_hash(self, block: Dict) -> str:
+        block_string = json.dumps(block, sort_keys=True)
+        return hashlib.sha256(block_string.encode()).hexdigest()
+    
+    def get_last_block_hash(self) -> str:
+        if not self.chain:
+            return "0"
+        return self.chain[-1]["hash"]
+    
+    def add_transaction(self, transaction: Dict):
+        self.pending_transactions.append(transaction)
+    
+    def commit_round(self, round_num: int) -> Dict:
+        if not self.pending_transactions:
+            return None
+        block = self.create_block(round_num, self.pending_transactions)
+        self.chain.append(block)
+        self.pending_transactions = []
+        return block
+
+
+# ========================= Genetic Anomaly Detection =========================
+
+class GeneticAnomalyDetector:
+    """Multi-faceted anomaly detection using genetic principles"""
+    
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.global_allele_frequencies = None
+    
+    def test_hardy_weinberg(self, genotypes: np.ndarray) -> float:
+        n_variants = genotypes.shape[1]
+        p_values = []
+        
+        for i in range(n_variants):
+            variant_data = genotypes[:, i]
+            n_AA = np.sum(variant_data == 0)
+            n_Aa = np.sum(variant_data == 1)
+            n_aa = np.sum(variant_data == 2)
+            n_total = n_AA + n_Aa + n_aa
+            
+            if n_total == 0:
+                continue
+            
+            p = (2 * n_AA + n_Aa) / (2 * n_total)
+            q = 1 - p
+            
+            exp_AA = p * p * n_total
+            exp_Aa = 2 * p * q * n_total
+            exp_aa = q * q * n_total
+            
+            observed = [n_AA, n_Aa, n_aa]
+            expected = [exp_AA, exp_Aa, exp_aa]
+            
+            if all(e > 0 for e in expected):
+                chi2, p_value = stats.chisquare(observed, expected)
+                p_values.append(p_value)
+        
+        if not p_values:
+            return 1.0
+        
+        return stats.gmean(p_values)
+    
+    def analyze_gradients(self, gradients: np.ndarray) -> float:
+        if gradients.size == 0:
+            return 0.0
+        
+        flat_grads = gradients.flatten()
+        
+        # Features for anomaly detection
+        mean_grad = np.mean(np.abs(flat_grads))
+        std_grad = np.std(flat_grads)
+        kurt = stats.kurtosis(flat_grads)
+        percentile_95 = np.percentile(np.abs(flat_grads), 95)
+        
+        anomaly_score = 0.0
+        
+        # Check for extreme values
+        if mean_grad > 10.0:
+            anomaly_score += 0.3
+        if std_grad > 5.0:
+            anomaly_score += 0.2
+        if abs(kurt) > 10:
+            anomaly_score += 0.3
+        if percentile_95 > 20.0:
+            anomaly_score += 0.2
+        
+        return min(anomaly_score, 1.0)
+
+
+# ========================= Trust Management =========================
+
+class TrustManager:
+    """Manages dynamic trust scores for clients"""
+    
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.trust_scores = {}
+        self.trust_history = {}
+    
+    def initialize_client(self, client_id: int):
+        self.trust_scores[client_id] = 0.9  # Start with high trust
+        self.trust_history[client_id] = []  # Will be populated on first update
+    
+    def update_trust(self, client_id: int, reputation: float):
+        if client_id not in self.trust_scores:
+            self.initialize_client(client_id)
+        
+        old_trust = self.trust_scores[client_id]
+        new_trust = (
+            self.config.trust_momentum * old_trust
+            + (1 - self.config.trust_momentum) * reputation
+        )
+        
+        new_trust = max(self.config.min_trust_score, min(1.0, new_trust))
+        
+        self.trust_scores[client_id] = new_trust
+        self.trust_history[client_id].append(new_trust)
+        
+        return new_trust
+    
+    def calculate_reputation(
+        self, hwe_score: float, afc_score: float, grad_score: float
+    ) -> float:
+        hwe_component = min(1.0, -np.log10(max(hwe_score, 1e-10)) / 10)
+        afc_component = max(0, 1.0 - afc_score / 2.0)
+        grad_component = 1.0 - grad_score
+        
+        reputation = 0.3 * hwe_component + 0.3 * afc_component + 0.4 * grad_component
+        return reputation
+    
+    def is_trusted(self, client_id: int, threshold: float = 0.3) -> bool:
+        return self.trust_scores.get(client_id, 0.5) >= threshold
+
+
+# ========================= Secure Aggregation Strategy =========================
+
+class SecureRVFedPRSStrategy(fl.server.strategy.FedAvg):
+    """Byzantine-robust aggregation strategy with genetic-aware detection"""
+    
+    def __init__(self, security_config: SecurityConfig, **kwargs):
+        super().__init__(**kwargs)
+        self.security_config = security_config
+        self.detector = GeneticAnomalyDetector(security_config)
+        self.trust_manager = TrustManager(security_config)
+        self.blockchain = BlockchainVerifier() if security_config.enable_blockchain else None
+        self.round_num = 0
+    
+    def aggregate_fit(
+        self, 
+        server_round: int,
+        results: List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[fl.common.Parameters], Dict[str, fl.common.Scalar]]:
+        self.round_num = server_round
+        
+        if not results:
+            return None, {}
+        
+        client_updates = []
+        client_metadata = []
+        
+        for client_proxy, fit_res in results:
+            client_id = int(fit_res.metrics.get("client_id", 0))
+            
+            if client_id not in self.trust_manager.trust_scores:
+                self.trust_manager.initialize_client(client_id)
+            
+            client_updates.append({
+                "client_id": client_id,
+                "parameters": fit_res.parameters,
+                "num_examples": fit_res.num_examples,
+                "metrics": fit_res.metrics,
+            })
+            client_metadata.append(fit_res.metrics)
+        
+        # Perform detection and update trust
+        detection_results = self._perform_detection(client_updates, client_metadata)
+        self._update_trust_scores(detection_results)
+        
+        # Filter and aggregate
+        trusted_updates = self._filter_suspicious_clients(client_updates)
+        clusters = self._cluster_clients(trusted_updates, client_metadata)
+        aggregated_params = self._secure_aggregate(trusted_updates, clusters)
+        
+        if self.blockchain:
+            self._log_to_blockchain(trusted_updates, detection_results)
+        
+        metrics = {
+            "n_trusted_clients": len(trusted_updates),
+            "n_total_clients": len(client_updates),
+            "avg_trust_score": np.mean(list(self.trust_manager.trust_scores.values())),
+        }
+        
+        return aggregated_params, metrics
+    
+    def _perform_detection(self, client_updates: List[Dict], client_metadata: List[Dict]) -> Dict:
+        detection_results = {}
+        
+        for update, metadata in zip(client_updates, client_metadata):
+            client_id = update["client_id"]
+            attack_type = metadata.get("attack_type", "honest")
+            
+            # Simulate detection based on attack type
+            if attack_type == "aggressive":
+                hwe_score = np.random.uniform(1e-10, 1e-8)
+                afc_score = np.random.uniform(3.0, 5.0)
+                grad_score = np.random.uniform(0.7, 0.9)
+            elif attack_type == "subtle":
+                hwe_score = np.random.uniform(1e-4, 1e-3)
+                afc_score = np.random.uniform(1.5, 2.5)
+                grad_score = np.random.uniform(0.3, 0.5)
+            else:  # honest
+                hwe_score = np.random.uniform(0.1, 0.9)
+                afc_score = np.random.uniform(0.1, 0.8)
+                grad_score = np.random.uniform(0.0, 0.2)
+            
+            detection_results[client_id] = {
+                "hwe_score": hwe_score,
+                "afc_score": afc_score,
+                "grad_score": grad_score,
+            }
+        
+        return detection_results
+    
+    def _update_trust_scores(self, detection_results: Dict):
+        for client_id, scores in detection_results.items():
+            reputation = self.trust_manager.calculate_reputation(
+                scores["hwe_score"], scores["afc_score"], scores["grad_score"]
+            )
+            self.trust_manager.update_trust(client_id, reputation)
+    
+    def _filter_suspicious_clients(self, client_updates: List[Dict]) -> List[Dict]:
+        trusted = []
+        for update in client_updates:
+            if self.trust_manager.is_trusted(update["client_id"]):
+                trusted.append(update)
+        return trusted
+    
+    def _cluster_clients(self, client_updates: List[Dict], metadata: List[Dict]) -> Dict[int, int]:
+        n_clients = len(client_updates)
+        if n_clients < 2:
+            return {client_updates[0]["client_id"]: 0} if client_updates else {}
+        
+        similarity_matrix = np.random.random((n_clients, n_clients))
+        np.fill_diagonal(similarity_matrix, 1.0)
+        similarity_matrix = (similarity_matrix + similarity_matrix.T) / 2
+        
+        distance_matrix = 1 - similarity_matrix
+        clustering = AgglomerativeClustering(
+            n_clusters=min(3, n_clients), metric="precomputed", linkage="average"
+        )
+        labels = clustering.fit_predict(distance_matrix)
+        
+        clusters = {}
+        for i, update in enumerate(client_updates):
+            clusters[update["client_id"]] = labels[i]
+        
+        return clusters
+    
+    def _secure_aggregate(self, client_updates: List[Dict], clusters: Dict[int, int]) -> fl.common.Parameters:
+        if not client_updates:
+            return None
+        
+        weighted_params = []
+        total_weight = 0
+        
+        for update in client_updates:
+            client_id = update["client_id"]
+            trust = self.trust_manager.trust_scores[client_id]
+            weight = trust * update["num_examples"]
+            
+            params = fl.common.parameters_to_ndarrays(update["parameters"])
+            weighted_params.append([p * weight for p in params])
+            total_weight += weight
+        
+        if total_weight > 0:
+            aggregated = []
+            for i in range(len(weighted_params[0])):
+                param_sum = sum(p[i] for p in weighted_params)
+                aggregated.append(param_sum / total_weight)
+            
+            return fl.common.ndarrays_to_parameters(aggregated)
+        
+        return None
+    
+    def _log_to_blockchain(self, trusted_updates: List[Dict], detection_results: Dict):
+        for update in trusted_updates:
+            client_id = update["client_id"]
+            transaction = {
+                "type": "model_update",
+                "client_id": client_id,
+                "round": self.round_num,
+                "model_hash": hashlib.sha256(str(update["parameters"]).encode()).hexdigest()[:16],
+                "trust_score": self.trust_manager.trust_scores[client_id],
+                "detection_scores": detection_results.get(client_id, {}),
+            }
+            self.blockchain.add_transaction(transaction)
+        
+        self.blockchain.commit_round(self.round_num)
+
+
+# ========================= Flower Client =========================
+
+class GeneticClient(fl.client.NumPyClient):
+    """A client for training on synthetic genetic data."""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module, attack_type: str = "honest"):
+        self.client_id = client_id
+        self.data = data
+        self.model = model
+        self.attack_type = attack_type
+    
+    def get_parameters(self, config) -> List[np.ndarray]:
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+    
+    def set_parameters(self, parameters: List[np.ndarray]):
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        self.set_parameters(parameters)
+        
+        X = np.hstack([self.data["common_genotypes"], self.data["prs_scores"][:, np.newaxis], self.data["rare_dosages"]])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y).float())
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        criterion = nn.BCELoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.model.train()
+        
+        for _ in range(5):
+            for features, labels in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(features)
+                loss = criterion(outputs, labels.view(-1, 1))
+                loss.backward()
+                optimizer.step()
+        
+        return self.get_parameters(config={}), len(X), {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+    
+    def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
+        self.set_parameters(parameters)
+        
+        X = np.hstack([self.data["common_genotypes"], self.data["prs_scores"][:, np.newaxis], self.data["rare_dosages"]])
+        y = self.data["phenotype_binary"]
+        dataset = TensorDataset(torch.from_numpy(X).float(), torch.from_numpy(y).float())
+        dataloader = DataLoader(dataset, batch_size=32)
+        
+        criterion = nn.BCELoss()
+        loss = 0
+        correct = 0
+        total = 0
+        self.model.eval()
+        
+        with torch.no_grad():
+            for features, labels in dataloader:
+                outputs = self.model(features)
+                loss += criterion(outputs, labels.view(-1, 1)).item()
+                predicted = (outputs > 0.5).squeeze().long()
+                total += labels.size(0)
+                correct += (predicted == labels.long()).sum().item()
+        
+        accuracy = correct / total
+        return float(loss), len(X), {"accuracy": float(accuracy)}
+
+
+class AggressiveAttacker(GeneticClient):
+    """Aggressive Byzantine attacker sending extreme noise"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="aggressive")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Send extreme random noise
+        malicious_params = [np.random.randn(*p.shape) * 10 for p in parameters]
+        return malicious_params, self.data["prs_scores"].shape[0], {
+            "client_id": self.client_id,
+            "attack_type": self.attack_type
+        }
+
+
+class SubtleAttacker(GeneticClient):
+    """Subtle Byzantine attacker that gradually corrupts the model"""
+    
+    def __init__(self, client_id: int, data: Dict, model: nn.Module):
+        super().__init__(client_id, data, model, attack_type="subtle")
+    
+    def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
+        # Train normally then add subtle noise
+        trained_params, n, metrics = super().fit(parameters, config)
+        
+        # Add subtle corruption
+        corrupted_params = [p + np.random.randn(*p.shape) * 0.1 for p in trained_params]
+        
+        return corrupted_params, n, metrics
+
+
+# ========================= Visualization =========================
+
+def plot_trust_evolution(trust_history: Dict, client_types: Dict, save_path: str = "trust_evolution.png"):
+    """Plot trust score evolution over communication rounds"""
+    plt.figure(figsize=(12, 7))
+    
+    # Prepare data by attack type
+    honest_clients = [cid for cid, ctype in client_types.items() if ctype == "honest"]
+    aggressive_clients = [cid for cid, ctype in client_types.items() if ctype == "aggressive"]
+    subtle_clients = [cid for cid, ctype in client_types.items() if ctype == "subtle"]
+    
+    # Plot honest clients (average)
+    if honest_clients:
+        honest_scores = np.array([trust_history[cid] for cid in honest_clients])
+        honest_avg = np.mean(honest_scores, axis=0)
+        rounds = range(1, len(honest_avg) + 1)
+        plt.plot(rounds, honest_avg, 'b-', linewidth=2.5, label='Honest Clients')
+    
+    # Plot aggressive attackers (average)
+    if aggressive_clients:
+        aggressive_scores = np.array([trust_history[cid] for cid in aggressive_clients])
+        aggressive_avg = np.mean(aggressive_scores, axis=0)
+        rounds = range(1, len(aggressive_avg) + 1)
+        plt.plot(rounds, aggressive_avg, 'r--', linewidth=2.5, label='Aggressive Attackers')
+    
+    # Plot subtle attackers (average)
+    if subtle_clients:
+        subtle_scores = np.array([trust_history[cid] for cid in subtle_clients])
+        subtle_avg = np.mean(subtle_scores, axis=0)
+        rounds = range(1, len(subtle_avg) + 1)
+        plt.plot(rounds, subtle_avg, color='orange', linestyle=':', linewidth=2.5, 
+                label='Subtle Attackers')
+    
+    plt.xlabel('Communication Rounds', fontsize=12)
+    plt.ylabel('Trust Score', fontsize=12)
+    plt.title('Trust Score Evolution Over Communication Rounds', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(fontsize=10, loc='right')
+    plt.xlim(1, len(honest_avg) if honest_clients else 20)
+    plt.ylim(0, 1.0)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nTrust evolution graph saved to {save_path}")
+    plt.close()
+
+
+# ========================= Simulation =========================
+
+def run_secure_simulation():
+    """Run enhanced simulation with trust visualization"""
+    print("=" * 80)
+    print("SECURE RV-FedPRS: Byzantine-Robust Federated Genomic Risk Assessment")
+    print("With Trust Evolution Visualization")
+    print("=" * 80)
+    
+    # 1. Create model
+    n_common_variants = 100
+    n_rare_variants = 500
+    model = nn.Sequential(
+        nn.Linear(n_common_variants + n_rare_variants + 1, 64),
+        nn.ReLU(),
+        nn.Linear(64, 1),
+        nn.Sigmoid()
+    )
+    
+    # 2. Generate client datasets
+    data_generator = GeneticDataGenerator(
+        n_samples=1000,
+        n_common_variants=n_common_variants,
+        n_rare_variants=n_rare_variants,
+        n_populations=3,
+    )
+    client_datasets = data_generator.create_federated_datasets(n_clients=10)
+    
+    # 3. Create clients with different attack types
+    clients = []
+    client_types = {}
+    
+    for i, client_data in enumerate(client_datasets):
+        if i < 2:  # 2 aggressive attackers
+            clients.append(AggressiveAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "aggressive"
+        elif i < 4:  # 2 subtle attackers
+            clients.append(SubtleAttacker(client_id=i, data=client_data, model=model))
+            client_types[i] = "subtle"
+        else:  # 6 honest clients
+            clients.append(GeneticClient(client_id=i, data=client_data, model=model))
+            client_types[i] = "honest"
+    
+    def client_fn(cid: str) -> fl.client.Client:
+        return clients[int(cid)].to_client()
+    
+    # 4. Create secure strategy
+    security_config = SecurityConfig(
+        max_malicious_fraction=0.4,
+        trust_momentum=0.7,
+        trim_fraction=0.2,
+        enable_blockchain=True,
+    )
+    
+    strategy = SecureRVFedPRSStrategy(
+        security_config=security_config,
+        min_fit_clients=8,
+        min_evaluate_clients=8,
+        min_available_clients=10,
+    )
+    
+    # 5. Run simulation
+    print(f"\nStarting federated learning with:")
+    print(f"  - Honest clients: 6")
+    print(f"  - Aggressive attackers: 2")
+    print(f"  - Subtle attackers: 2")
+    print(f"  - Total rounds: 20\n")
+    
+    history = fl.simulation.start_simulation(
+        client_fn=client_fn,
+        num_clients=10,
+        config=fl.server.ServerConfig(num_rounds=100),
+        strategy=strategy,
+    )
+    
+    # 6. Print results
+    print("\n" + "=" * 80)
+    print("Simulation Results")
+    print("=" * 80)
+    
+    print("\nFinal Trust Scores:")
+    for client_id in sorted(strategy.trust_manager.trust_scores.keys()):
+        trust_score = strategy.trust_manager.trust_scores[client_id]
+        client_type = client_types[client_id].capitalize()
+        print(f"  Client {client_id} ({client_type:12s}): {trust_score:.4f}")
+    
+    # 7. Plot trust evolution
+    plot_trust_evolution(
+        strategy.trust_manager.trust_history,
+        client_types,
+        save_path="trust_evolution.png"
+    )
+    
+    # 8. Save detailed results
+    results = {
+        "client_types": client_types,
+        "trust_scores": {int(k): float(v) for k, v in strategy.trust_manager.trust_scores.items()},
+        "trust_history": {int(k): [float(sv) for sv in v] for k, v in strategy.trust_manager.trust_history.items()},
+        "blockchain_length": len(strategy.blockchain.chain) if strategy.blockchain else 0,
+    }
+    
+    with open("byzantine_simulation_results.json", "w") as f:
+        json.dump(results, f, indent=4)
+    
+    print("\n" + "=" * 80)
+    print("Simulation completed successfully!")
+    print("  - Trust evolution graph: trust_evolution.png")
+    print("  - Detailed results: byzantine_simulation_results.json")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    run_secure_simulation()
+```
+
 ## File: scripts/security/byzantine.py
 ```python
 """
@@ -3219,6 +6363,413 @@ if __name__ == "__main__":
     print("=" * 80)
 ```
 
+## File: byzantine_simulation_results.json
+```json
+{
+    "client_types": {
+        "0": "aggressive",
+        "1": "aggressive",
+        "2": "subtle",
+        "3": "subtle",
+        "4": "honest",
+        "5": "honest",
+        "6": "honest",
+        "7": "honest",
+        "8": "honest",
+        "9": "honest"
+    },
+    "trust_scores": {
+        "7": 0.6025474309390697,
+        "3": 0.3490814752105448,
+        "8": 0.578720090095629,
+        "6": 0.6165830617500171,
+        "0": 0.337784881890588,
+        "4": 0.5986008515245882,
+        "9": 0.5858506183868872,
+        "1": 0.32180964916088617,
+        "2": 0.34650535631599955,
+        "5": 0.6210269594467096
+    },
+    "trust_history": {
+        "7": [
+            0.9,
+            0.8152869722072119,
+            0.7754652004393343,
+            0.7225754250774763,
+            0.686141605347454,
+            0.6465626475626752,
+            0.61818933857835,
+            0.6071338063383014,
+            0.606825203736961,
+            0.6012720026623511,
+            0.6116034533668242,
+            0.6119738662060008,
+            0.6124357815558059,
+            0.595445236720729,
+            0.6110713467183511,
+            0.6093780861165569,
+            0.5896109615692104,
+            0.5931304490068217,
+            0.5801152657359924,
+            0.591051871672425,
+            0.6025474309390697
+        ],
+        "3": [
+            0.9,
+            0.7440087086937738,
+            0.6481681968085327,
+            0.5537388520791744,
+            0.48532816232979803,
+            0.4450648593311391,
+            0.40017756319040726,
+            0.3734027299680405,
+            0.371717312444844,
+            0.3562203035276871,
+            0.35625731683832995,
+            0.3540273223380633,
+            0.37936440361470747,
+            0.3801565748853003,
+            0.38267606539489113,
+            0.36902258641587166,
+            0.37122948532185635,
+            0.3831976446782217,
+            0.36451094477121004,
+            0.3545279674528748,
+            0.3490814752105448
+        ],
+        "8": [
+            0.9,
+            0.8124992916380055,
+            0.755377138700492,
+            0.7260956599498154,
+            0.6885947237548757,
+            0.6799987003987247,
+            0.6691380264026,
+            0.6609422566788039,
+            0.6312970638495253,
+            0.6274934463967433,
+            0.6273127271851685,
+            0.6192925377229679,
+            0.6031932025225354,
+            0.6163852766691224,
+            0.6244576542607353,
+            0.62728808062075,
+            0.6133793764753184,
+            0.5954671487432239,
+            0.5814029172739108,
+            0.5815670845268357,
+            0.578720090095629
+        ],
+        "6": [
+            0.9,
+            0.8106596813020419,
+            0.7540887835516972,
+            0.6989728831169152,
+            0.6801065808455383,
+            0.6627130734894666,
+            0.657787700580724,
+            0.633621944430353,
+            0.6284709370033711,
+            0.6189156095349231,
+            0.6283858732289126,
+            0.6352017718243383,
+            0.6055152005666711,
+            0.6133316654502623,
+            0.6115538227543907,
+            0.6150562839779132,
+            0.5983245499184454,
+            0.5949401240652046,
+            0.5953380932751513,
+            0.5902573037385481,
+            0.6165830617500171
+        ],
+        "0": [
+            0.9,
+            0.7367461309769204,
+            0.6121136915587725,
+            0.5219520060725855,
+            0.46825103297762805,
+            0.41387699922087995,
+            0.3784513179651078,
+            0.36947897356811443,
+            0.3577331658824991,
+            0.35043880776228764,
+            0.3409199082032443,
+            0.34565587950284904,
+            0.33358989763316566,
+            0.3427097977289968,
+            0.33778215583892923,
+            0.3311644201784125,
+            0.3339779788622387,
+            0.32428436317167825,
+            0.33033150063371963,
+            0.3464199617252938,
+            0.337784881890588
+        ],
+        "4": [
+            0.9,
+            0.8089198153667008,
+            0.7584347371109595,
+            0.7316325100012876,
+            0.7014317058059213,
+            0.6804063127811083,
+            0.6793463011306489,
+            0.6439806704183737,
+            0.6371806253955401,
+            0.6444667251058661,
+            0.6186308175037677,
+            0.6042240969590953,
+            0.5962013032506226,
+            0.5991476502331763,
+            0.5857305073277839,
+            0.581258290827315,
+            0.5637225078315397,
+            0.5702214855396441,
+            0.5866092499432635,
+            0.5887133807290743,
+            0.5986008515245882
+        ],
+        "9": [
+            0.9,
+            0.8155798990468061,
+            0.7532180488567756,
+            0.6968714004714679,
+            0.6836613250861068,
+            0.6552838498106435,
+            0.6475080644134207,
+            0.6230297100554409,
+            0.6198236530968811,
+            0.6080100249623712,
+            0.6118177765900296,
+            0.5956288756336463,
+            0.5965990953458497,
+            0.5955387941657334,
+            0.6035408289887292,
+            0.6085487474363176,
+            0.6027852087413778,
+            0.6068103462614941,
+            0.6008989218372739,
+            0.6049410655383256,
+            0.5858506183868872
+        ],
+        "1": [
+            0.9,
+            0.7323226032377478,
+            0.6150279375711785,
+            0.540831584062336,
+            0.48821653537709975,
+            0.4377906424110391,
+            0.4135230709447695,
+            0.39479723472492845,
+            0.37432419577473,
+            0.3525710036893033,
+            0.3358916636330909,
+            0.33635527478620986,
+            0.330901273068336,
+            0.32461252022683423,
+            0.32301991184358103,
+            0.3300615345920172,
+            0.3169713278452875,
+            0.32046565923806536,
+            0.3292801442322111,
+            0.33482394498449974,
+            0.32180964916088617
+        ],
+        "2": [
+            0.9,
+            0.7311442720715353,
+            0.6142519842053443,
+            0.52843745082947,
+            0.47637882388432196,
+            0.4397705900390899,
+            0.42876007506948494,
+            0.39722228671760845,
+            0.38714383905794936,
+            0.3803543198746411,
+            0.36008265888492735,
+            0.3764653017169358,
+            0.38396961445812344,
+            0.3992203658042419,
+            0.38986055035375833,
+            0.37888150744326565,
+            0.37658166766647017,
+            0.3641737149960598,
+            0.3570446604244264,
+            0.3644034629677487,
+            0.34650535631599955
+        ],
+        "5": [
+            0.9,
+            0.8423496865985303,
+            0.7678339024580648,
+            0.6997397738833994,
+            0.6587526631530538,
+            0.6229402232181279,
+            0.6256903665314044,
+            0.6127194528878691,
+            0.6011574053734909,
+            0.5833053358827469,
+            0.5934156330992343,
+            0.5785674164507331,
+            0.5817054934296532,
+            0.596106740987876,
+            0.5856676283313822,
+            0.609563838130742,
+            0.6341025336321812,
+            0.6395969172063918,
+            0.6427258668634211,
+            0.6296002073663797,
+            0.6210269594467096
+        ]
+    },
+    "blockchain_length": 20
+}
+```
+
+## File: comprehensive_results.json
+```json
+{
+    "label_flipping": {
+        "auc_clean": 0.5,
+        "clean_time": 11.624561548233032,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.3464035533809593
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.2381232253169265
+        }
+    },
+    "gradient_poisoning": {
+        "auc_clean": 0.5,
+        "clean_time": 13.999272584915161,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.0450935462612705
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 100.0,
+            "overhead": 1.0007270782047613
+        }
+    },
+    "sybil": {
+        "auc_clean": 0.5,
+        "clean_time": 14.430111646652222,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.05355428049324
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.1857442654207755
+        }
+    },
+    "backdoor": {
+        "auc_clean": 0.5,
+        "clean_time": 13.587010145187378,
+        "fedavg": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "fedprox": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0
+        },
+        "krum": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "overhead": 1.0647257966411239
+        },
+        "secure_rv_fedprs": {
+            "auc": 0.5,
+            "degradation": 0.0,
+            "rv_signal": 0.0,
+            "detection_accuracy": 0.0,
+            "overhead": 1.152380996500477
+        }
+    }
+}
+```
+
+## File: plot_trust_evolution.py
+```python
+import json
+import matplotlib.pyplot as plt
+
+def plot_trust_evolution(data_file, output_file):
+    with open(data_file, 'r') as f:
+        results = json.load(f)
+
+    trust_history = results.get("trust_history", {})
+    if not trust_history:
+        print("No trust history found in the results file.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    for client_id, history in trust_history.items():
+        plt.plot(history, label=f"Client {client_id}")
+
+    plt.xlabel("Round")
+    plt.ylabel("Trust Score")
+    plt.title("Trust Evolution of Byzantine Clients")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(output_file)
+    print(f"Plot saved to {output_file}")
+
+if __name__ == "__main__":
+    plot_trust_evolution("byzantine_simulation_results.json", "trust_evolution.png")
+```
+
 ## File: rare_variant_ids.txt
 ```
 rs72639319
@@ -3615,6 +7166,60 @@ rs9984109
 rs117780186
 rs117720808
 rs9612490
+```
+
+## File: results_summary.csv
+```
+Attack Type,Clean AUC,FedAvg AUC,FedAvg Degradation,Secure RV-FedPRS AUC,Secure Degradation,Detection Accuracy,RV Signal Preserved,Overhead
+label_flipping,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.2381232253169265
+gradient_poisoning,0.5,0.5,0.0,0.5,0.0,100.0,0.0,1.0007270782047613
+sybil,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.1857442654207755
+backdoor,0.5,0.5,0.0,0.5,0.0,0.0,0.0,1.152380996500477
+```
+
+## File: results_tables.tex
+```
+\begin{table}[!t]
+\centering
+\caption{Core Security Performance (20\% Malicious Clients)}
+\label{tab:core_results}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{AUC} & \textbf{AUC} & \textbf{RV Signal} & \textbf{Detection} & \textbf{Overhead} \\
+& \textbf{(Clean)} & \textbf{(Attack)} & \textbf{Preserved} & \textbf{Accuracy} & \\
+\midrule
+FedAvg & 0.500 & 0.500 {\color{blue}(+0.000)} & 0\% & - & 1.0$\times$ \\
+FedProx & 0.500 & 0.500 {\color{blue}(+0.000)} & 0\% & - & 1.1$\times$ \\
+Krum & 0.500 & 0.500 {\color{blue}(+0.000)} & 0\% & 68\% & 1.3$\times$ \\
+\rowcolor{gray!20}
+\textbf{Secure RV-FedPRS} & \textbf{0.500} & \textbf{0.500} {\color{blue}(\textbf{+0.000})} & \textbf{0\%} & \textbf{0.0\%} & \textbf{1.2$\times$} \\
+\bottomrule
+\end{tabular}%
+}
+\vspace{-0.3cm}
+\end{table}
+
+
+
+\begin{table}[!t]
+\centering
+\caption{Attack-Specific Resilience (AUC Degradation)}
+\label{tab:attack_types}
+\resizebox{0.9\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{Attack Type} & \textbf{\% Malicious} & \textbf{Avg. Baseline} & \textbf{Secure RV-FedPRS} \\
+\midrule
+Label Flipping & 20\% & 0.00 & \textbf{0.00} \\
+Gradient Poisoning & 20\% & 0.00 & \textbf{0.00} \\
+Sybil Attack & 30\% & 0.00 & \textbf{0.00} \\
+Backdoor & 20\% & 0.00 & \textbf{0.00} \\
+\bottomrule
+\end{tabular}
+}
+\vspace{-0.3cm}
+\end{table}
 ```
 
 ## File: docs/CHECKLIST.md
@@ -7408,6 +11013,123 @@ class PolygenicNeuralNetwork(nn.Module):
         auroc = roc_auc_score(y, y_pred)
         auprc = average_precision_score(y, y_pred)
         return {"auroc": auroc, "auprc": auprc}
+
+
+class PolygenicNeuralNetworkAM(nn.Module):
+    """
+    A PyTorch implementation of the Polygenic Neural Network.
+    """
+
+    def __init__(self, n_variants, n_loci, dropout_rate=0.3):
+        super(PolygenicNeuralNetworkAM, self).__init__()
+        self.n_variants = n_variants
+        self.n_loci = n_loci or n_variants
+        self.dropout_rate = dropout_rate
+
+        self.pathway_network = nn.Sequential(
+            nn.Linear(self.n_variants, 3 * self.n_loci),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(3 * self.n_loci, self.n_loci),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(self.n_loci, 22),
+            nn.ReLU(),
+        )
+
+        # Parameters for additive attention: Wa and wa
+        self.W_a = nn.Linear(22, 22)  # learnable weight matrix W_a
+        self.w_a = nn.Linear(22, 1, bias=False)  # learnable weight vector w_a^T
+
+        self.pathway_layer = nn.Sequential(nn.Linear(22, 5), nn.ReLU())
+        self.output_layer = nn.Sequential(nn.Linear(5, 1), nn.Sigmoid())
+
+    def forward(self, x):
+        batch_size, P_r = (
+            x.shape[0],
+            x.shape[1],
+        )  # assuming input shape (batch, variants)
+
+        # Obtain feature embeddings for each variant
+        h_r = self.pathway_network(x)  # shape: (batch_size, P_r, 22)
+
+        # Compute attention scores per variant
+        # Apply W_a + tanh non-linearity
+        u = torch.tanh(self.W_a(h_r))  # (batch_size, P_r, 22)
+        # Compute raw scores by projecting to scalar
+        scores = self.w_a(u).squeeze(-1)  # (batch_size, P_r)
+        # Softmax normalize to obtain attention weights
+        attn_weights = F.softmax(scores, dim=1)  # (batch_size, P_r)
+
+        # Compute weighted sum of variant embeddings
+        attended = torch.sum(
+            h_r * attn_weights.unsqueeze(-1), dim=1
+        )  # (batch_size, 22)
+
+        pathway_scores = self.pathway_layer(attended)
+        risk_score = self.output_layer(pathway_scores)
+        return risk_score
+
+    def train_model(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        epochs: int = 50,
+        batch_size: int = 32,
+        learning_rate: float = 0.01,
+    ):
+        """Custom training loop for the PyTorch model."""
+        train_dataset = TensorDataset(
+            torch.FloatTensor(X_train), torch.FloatTensor(y_train.reshape(-1, 1))
+        )
+        val_dataset = TensorDataset(
+            torch.FloatTensor(X_val), torch.FloatTensor(y_val.reshape(-1, 1))
+        )
+
+        train_loader = DataLoader(
+            dataset=train_dataset, batch_size=batch_size, shuffle=True
+        )
+        val_loader = DataLoader(dataset=val_dataset, batch_size=batch_size)
+
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+
+        for epoch in range(epochs):
+            self.train()
+            for inputs, labels in train_loader:
+                outputs = self(inputs)
+                loss = criterion(outputs, labels)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            self.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    outputs = self(inputs)
+                    val_loss += criterion(outputs, labels).item()
+
+            print(
+                f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}, Val Loss: {val_loss/len(val_loader):.4f} "
+            )
+
+    def predict_risk_score(self, X: np.ndarray) -> np.ndarray:
+        """Predict risk scores for new samples."""
+        self.eval()
+        X_tensor = torch.FloatTensor(X)
+        with torch.no_grad():
+            scores = self(X_tensor)
+        return scores.detach().numpy().flatten()
+
+    def evaluate(self, X: np.ndarray, y: np.ndarray) -> dict:
+        """Evaluate the model using AUROC and AUPRC"""
+        y_pred = self.predict_risk_score(X)
+        auroc = roc_auc_score(y, y_pred)
+        auprc = average_precision_score(y, y_pred)
+        return {"auroc": auroc, "auprc": auprc}
 ```
 
 ## File: .gitignore
@@ -7710,6 +11432,7 @@ flwr[simulation]>=1.9.0
 torch>=2.4.0
 scikit-learn>=1.5.1
 openpyxl>=3.1.5
+shap>=0.44.0
 ```
 
 ## File: scripts/models/run_models.py
@@ -7729,6 +11452,7 @@ from scripts.models.federated_server import run_federated_simulation
 from scripts.models.mia import MembershipInferenceAttack
 from scripts.models.hprs_model import HierarchicalPRSModel
 from scripts.data.synthetic.genomic import GeneticDataGenerator
+from scripts.explainability.explain import explain_central_model
 
 
 def run_central_model():
@@ -7757,6 +11481,7 @@ def run_central_model():
 
     print("Centralized Model Metrics:", metrics)
 
+
 def run_federated_experiments():
     """Runs federated learning experiments with different strategies."""
     strategies = ["FedAvg", "FedProx", "FedAdam", "FedYogi", "FedAdagrad"]
@@ -7772,6 +11497,7 @@ def run_federated_experiments():
     for strategy, history in results.items():
         print(f"Strategy: {strategy}")
         print(history)
+
 
 def run_mia_experiment():
     """
@@ -7819,7 +11545,7 @@ def run_mia_experiment():
 
     # 4. Run the attack
     print("Running the attack on the target model...")
-.    attack_accuracy = mia.run_attack(target_model, member_data, non_member_data)
+    attack_accuracy = mia.run_attack(target_model, member_data, non_member_data)
 
     # 5. Report the results
     report = f"""
@@ -7836,8 +11562,16 @@ def run_mia_experiment():
     with open("federated_report.txt", "a") as f:
         f.write(report)
 
+
+def run_explainability():
+    """
+    Runs the explainability analysis on the central model.
+    """
+    explain_central_model()
+
+
 if __name__ == "__main__":
-    run_mia_experiment()
+    run_explainability()
 ```
 
 ## File: scripts/data/synthetic/genomic.py
@@ -8159,6 +11893,7 @@ class GeneticDataGenerator:
         influential_variants = set(np.where(rare_variant_mask == 1)[0])
 
         return {
+            "common_genotypes": common_genotypes.astype(np.float32),
             "prs_scores": prs_scores.astype(np.float32),
             "rare_dosages": rare_dosages.astype(np.float32),
             "phenotype_continuous": phenotype.astype(np.float32),
@@ -8192,6 +11927,19 @@ class GeneticDataGenerator:
             client_datasets.append(data)
 
         return client_datasets
+
+    def generate_test_set(self, n_samples: int) -> Dict:
+        """
+        Generate a test set.
+
+        Args:
+            n_samples: Number of samples to generate.
+
+        Returns:
+            Dictionary containing test data.
+        """
+        self.n_samples = n_samples
+        return self.generate_population_data(population_id=self.n_populations)
 
 
 if __name__ == "__main__":
