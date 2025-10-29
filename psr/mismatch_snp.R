@@ -8,7 +8,7 @@ qc <- read.table("EUR.QC.snplist", header = F, stringsAsFactors = F)
 height <-
     read.table(gzfile("./data/HeightQC.gz"),
             header = T,
-            stringsAsFactors = F, 
+            stringsAsFactors = F,
             sep="\t")
 # Change all alleles to upper case for easy comparison
 height$A1 <- toupper(height$A1)

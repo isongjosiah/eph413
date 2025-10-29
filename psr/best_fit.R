@@ -40,7 +40,7 @@ for(i in p.threshold){
     prs.result <- rbind(prs.result, data.frame(Threshold=i, R2=prs.r2, P=prs.p, BETA=prs.beta,SE=prs.se))
 }
 # Best result is:
-prs.result[which.max(prs.result$R2), ]
+best.prs.result <- prs.result[which.max(prs.result$R2), ]
 
 # Save the single best result to a CSV file for future comparison
 write.csv(best.prs.result, "standard_prs_benchmark.csv", row.names = FALSE, quote = FALSE)
