@@ -1,0 +1,106 @@
+# Configuration for Federated Learning with Genetic-Aware Byzantine Defense
+# Based on manuscript experimental setup
+
+# ============================================================================
+# Federation Parameters
+# ============================================================================
+federation:
+  num_clients: 10  # Total participating clients (evaluated: 10, 25, 50, 100)
+  num_rounds: 50   # Total global training rounds
+
+# ============================================================================
+# Model Architecture Parameters
+# ============================================================================
+model:
+  # Common variant pathway (MLP for frequent variants)
+  common_variant_backbone:
+    hidden_dim: 128      # Hidden dimension size (d_c)
+    num_layers: 2        # Two-layer MLP architecture
+  
+  # Rare variant pathway (specialized network)
+  rare_variant_specialist:
+    hidden_dim: 256      # Hidden dimension size (d_r)
+    num_layers: 3        # Three-layer network architecture
+  
+  # Communication efficiency
+  quantization_bits: 8   # Bits for model update quantization
+
+# ============================================================================
+# Training Hyperparameters
+# ============================================================================
+training:
+  local_epochs: 5        # Epochs per client per round
+  batch_size: 32         # Local training batch size
+  learning_rate: 0.001   # Learning rate (η)
+
+# ============================================================================
+# Genetic-Aware Byzantine Defense Parameters
+# ============================================================================
+defense:
+  # Hardy-Weinberg Equilibrium Test
+  hwe_test:
+    p_value_threshold: 1.0e-6     # Genome-wide significance threshold
+    violation_ratio_threshold: 0.3 # Proportion threshold (θ_HWE)
+  
+  # Allele Frequency Consistency Test
+  afc_test:
+    log_ratio_threshold: 2.0       # Maximum log-ratio divergence (θ_AFC)
+  
+  # Gradient Plausibility Check
+  gradient_plausibility:
+    anomaly_score_threshold: 0.6   # Isolation Forest threshold (θ_s)
+  
+  # Trust Score System
+  trust_score:
+    initial_value: 1.0             # Starting trust score for all clients
+    decay_rate: 0.2                # Multiplicative decay rate (λ)
+    exclusion_threshold: 0.1       # Minimum trust score for participation
+  
+  # Attention-Based Clustering
+  clustering:
+    attention_threshold: 0.05      # Attention score threshold (θ_α)
+
+# ============================================================================
+# Explainability Module Parameters
+# ============================================================================
+explainability:
+  # Counterfactual Explanations
+  counterfactuals:
+    max_variants_to_modify: 3      # Maximum variants to alter (clinical feasibility)
+  
+  # Differential Privacy for Explanations
+  differential_privacy:
+    epsilon: 5.0                   # Privacy budget (ε_expl)
+
+# ============================================================================
+# Data Simulation Parameters
+# ============================================================================
+data_simulation:
+  total_samples: 50000             # Total individuals in simulated cohort
+  client_sample_range: [500, 2000] # Sample size range per client
+  maf_variation_percent: 0.30      # ±30% MAF distribution variation
+
+# ============================================================================
+# Attack Scenario Parameters (for evaluation)
+# ============================================================================
+attack_scenarios:
+  malicious_client_percent: 10     # Percentage of malicious clients (10%, 20%, 30%)
+  
+  # Gradient Poisoning Attack
+  gradient_poisoning_noise_std: 0.5  # Gaussian noise std dev (0.5, 1.0, 2.0)
+  
+  # Sybil Attack
+  sybil_hwe_violation_percent: 50    # Percentage of variants violating HWE
+
+# ============================================================================
+# Experimental Configurations (for batch evaluation)
+# ============================================================================
+experimental_settings:
+  # Client scale experiments
+  client_scales: [10, 25, 50, 100]
+  
+  # Malicious client percentages
+  malicious_percentages: [10, 20, 30]
+  
+  # Gradient poisoning noise levels
+  poisoning_noise_levels: [0.5, 1.0, 2.0]
